@@ -1,0 +1,20 @@
+# Usa l'immagine ufficiale di Bun
+FROM oven/bun
+
+# Imposta la working directory
+WORKDIR /app
+
+# Copia tutto il progetto nel container
+COPY . .
+
+# Installa le dipendenze
+RUN bun install
+
+# Costruisce il frontend (se necessario)
+RUN bun run build
+
+# ❗ Espone la porta giusta
+EXPOSE 3001
+
+# ❗ Usa bun run per eseguire correttamente
+CMD ["bun", "run", "src/server/index.ts"]
