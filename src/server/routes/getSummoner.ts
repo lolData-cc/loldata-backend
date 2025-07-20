@@ -1,4 +1,5 @@
 import { supabase } from '../supabase/client'
+
 export async function getSummonerHandler(req: Request): Promise<Response> {
     try {
         const body = await req.json()
@@ -11,9 +12,13 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
         const RIOT_API_KEY = process.env.RIOT_API_KEY
         if (!RIOT_API_KEY) throw new Error("Missing Riot API key")
 
+        // Normalizza input per fetch
+        const nameLower = name.toLowerCase()
+        const tagLower = tag.toLowerCase()
+
         // Step 1: prendi il puuid
         const accountRes = await fetch(
-            `https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${name}/${tag}`,
+            `https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${nameLower}/${tagLower}`,
             {
                 headers: {
                     "X-Riot-Token": RIOT_API_KEY,
@@ -59,9 +64,6 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
 
         const isLive = liveRes.status === 200
 
-
-
-
         const rankedRes = await fetch(
             `https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/${account.puuid}`,
             {
@@ -93,12 +95,12 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
             live: isLive,
         }
 
-
         console.log("📦 Risposta summoner:", summoner)
 
+        // Salvataggio normalizzato (lowercase)
         const { error } = await supabase.from("users").upsert({
-            name: account.gameName,
-            tag: account.tagLine,
+            name: account.gameName.toLowerCase(),
+            tag: account.tagLine.toLowerCase(),
             icon_id: summonerData.profileIconId,
             rank: soloQueue ? `${soloQueue.tier} ${soloQueue.rank}` : "Unranked",
             last_searched_at: new Date().toISOString(),
