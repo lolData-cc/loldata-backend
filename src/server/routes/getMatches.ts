@@ -8,15 +8,15 @@ function delay(ms: number) {
 export async function getMatchesHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json()
-    const { name, tag } = body
+    const { name, tag, region } = body
 
-    if (!name || !tag) {
-      console.error("Missing name or tag")
-      return new Response("Missing name or tag", { status: 400 })
-    }
+    if (!name || !tag || !region) {
+  console.error("Missing name, tag or region")
+  return new Response("Missing name, tag or region", { status: 400 })
+}
 
-    const account = await getAccountByRiotId(name, tag)
-    const matchIds = await getMatchIdsByPuuid(account.puuid, 10)
+    const account = await getAccountByRiotId(name, tag, region)
+    const matchIds = await getMatchIdsByPuuid(account.puuid, region, 10)
 
     const matchesWithWin = []
     const championStats: Record<string, {
@@ -32,7 +32,8 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
 
     for (const matchId of matchIds) {
       try {
-        const match = await getMatchDetails(matchId)
+        const match = await getMatchDetails(matchId, region)
+
 
         const participant = match.info.participants.find(
           (p: any) => p.puuid === account.puuid

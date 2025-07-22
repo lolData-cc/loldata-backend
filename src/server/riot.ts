@@ -2,10 +2,25 @@
 const RIOT_API_KEY = process.env.RIOT_API_KEY!;
 const REGION = "europe";
 
-export async function getAccountByRiotId(name: string, tag: string) {
-  const endpoint = `https://${REGION}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(
-    name
-  )}/${encodeURIComponent(tag)}`
+const regionRouting = {
+  EUW: {
+    account: "europe.api.riotgames.com",
+    match: "europe.api.riotgames.com",
+  },
+  NA: {
+    account: "americas.api.riotgames.com",
+    match: "americas.api.riotgames.com",
+  },
+  KR: {
+    account: "asia.api.riotgames.com",
+    match: "asia.api.riotgames.com",
+  }
+}
+
+
+export async function getAccountByRiotId(name: string, tag: string, region: string) {
+  const routing = regionRouting[region.toUpperCase()]
+  const endpoint = `https://${routing.account}/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(name)}/${encodeURIComponent(tag)}`
 
   console.log("🔍 URL chiamato:", endpoint)
 
@@ -25,13 +40,12 @@ export async function getAccountByRiotId(name: string, tag: string) {
 }
 
 
-export async function getMatchIdsByPuuid(puuid: string, count = 5) {
-  const res = await fetch(
-    `https://${REGION}.api.riotgames.com/lol/match/v5/matches/by-puuid/${puuid}/ids?count=${count}`,
-    {
-      headers: { "X-Riot-Token": RIOT_API_KEY },
-    }
-  );
+export async function getMatchIdsByPuuid(puuid: string, region: string, count = 5) {
+  const routing = regionRouting[region.toUpperCase()]
+  const res = await fetch(`https://${routing.match}/lol/match/v5/matches/by-puuid/${puuid}/ids?count=${count}`, {
+    headers: { "X-Riot-Token": RIOT_API_KEY },
+  })
+
 
   if (!res.ok) {
     throw new Error("Unable to fetch matches");
@@ -66,13 +80,11 @@ export async function getRankedDataBySummonerId(summonerId: string) {
 }
 
 
-export async function getMatchDetails(matchId: string) {
-  const res = await fetch(
-    `https://${REGION}.api.riotgames.com/lol/match/v5/matches/${matchId}`,
-    {
-      headers: { "X-Riot-Token": RIOT_API_KEY },
-    }
-  )
+export async function getMatchDetails(matchId: string, region: string) {
+  const routing = regionRouting[region.toUpperCase()]
+  const res = await fetch(`https://${routing.match}/lol/match/v5/matches/${matchId}`, {
+    headers: { "X-Riot-Token": RIOT_API_KEY },
+  })
 
   if (!res.ok) {
     const text = await res.text()
@@ -83,12 +95,12 @@ export async function getMatchDetails(matchId: string) {
   return await res.json()
 }
 
-export async function getMatchesWithWin(puuid: string, count = 5) {
-  const matchIds: string[] = await getMatchIdsByPuuid(puuid, count)
+export async function getMatchesWithWin(puuid: string, region: string, count = 5) {
+  const matchIds: string[] = await getMatchIdsByPuuid(puuid, region, count)
 
   const matches = await Promise.all(
     matchIds.map(async (id) => {
-      const match = await getMatchDetails(id)
+      const match = await getMatchDetails(id, region)
       const participant = match.info.participants.find((p: any) => p.puuid === puuid)
       return {
         match,
@@ -100,12 +112,13 @@ export async function getMatchesWithWin(puuid: string, count = 5) {
   return matches
 }
 
-export async function getLiveGameByPuuid(puuid: string) {
+export async function getLiveGameByPuuid(puuid: string, region: string) {
+  const routing = regionRouting[region.toUpperCase()]
   const RIOT_API_KEY = process.env.RIOT_API_KEY
   if (!RIOT_API_KEY) throw new Error("Missing Riot API key")
 
   const liveRes = await fetch(
-    `https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/${puuid}`,
+    `https://${routing.platform}/lol/spectator/v5/active-games/by-summoner/${puuid}`,
     {
       headers: { "X-Riot-Token": RIOT_API_KEY },
     }

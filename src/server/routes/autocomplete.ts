@@ -1,11 +1,14 @@
-
 import { supabase } from "../supabase/client"
 
 export async function autocompleteHandler(req: Request): Promise<Response> {
   const body = await req.json()
-  const { query } = body
+  const { query, region } = body
 
-  if (!query || query.length < 2) {
+  if (!query || !region) {
+    return new Response("Missing query or region", { status: 400 })
+  }
+
+  if (query.length < 2) {
     return Response.json({ results: [] })
   }
 
@@ -13,6 +16,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
     .from("users")
     .select("name, tag, icon_id, rank")
     .ilike("name", `%${query}%`)
+    .eq("region", region.toUpperCase()) 
     .order("last_searched_at", { ascending: false })
     .limit(5)
 

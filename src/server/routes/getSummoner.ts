@@ -1,5 +1,20 @@
 import { supabase } from '../supabase/client'
 
+const regionRouting = {
+    EUW: {
+        account: "europe.api.riotgames.com",
+        platform: "euw1.api.riotgames.com"
+    },
+    NA: {
+        account: "americas.api.riotgames.com",
+        platform: "na1.api.riotgames.com"
+    },
+    KR: {
+        account: "asia.api.riotgames.com",
+        platform: "kr.api.riotgames.com"
+    }
+}
+
 function rankToScore(tier: string, division: string, lp: number): number {
     const tierOrder = [
         "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM",
@@ -20,12 +35,16 @@ function rankToScore(tier: string, division: string, lp: number): number {
 export async function getSummonerHandler(req: Request): Promise<Response> {
     try {
         const body = await req.json()
-        const { name, tag } = body
+        const { name, tag, region } = body
 
-        if (!name || !tag) {
-            return new Response("Missing name or tag", { status: 400 })
+        if (!name || !tag || !region) {
+            return new Response("Missing name, tag or region", { status: 400 })
         }
 
+        const routing = regionRouting[region.toUpperCase()]
+        if (!routing) {
+            return new Response("Invalid region", { status: 400 })
+        }
         const RIOT_API_KEY = process.env.RIOT_API_KEY
         if (!RIOT_API_KEY) throw new Error("Missing Riot API key")
 
@@ -35,7 +54,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
 
         // Step 1: prendi il puuid
         const accountRes = await fetch(
-            `https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${nameLower}/${tagLower}`,
+            `https://${routing.account}/riot/account/v1/accounts/by-riot-id/${nameLower}/${tagLower}`,
             {
                 headers: {
                     "X-Riot-Token": RIOT_API_KEY,
@@ -52,12 +71,8 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
         const account = await accountRes.json()
 
         const summonerRes = await fetch(
-            `https://euw1.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/${account.puuid}`,
-            {
-                headers: {
-                    "X-Riot-Token": RIOT_API_KEY,
-                },
-            }
+            `https://${routing.platform}/lol/summoner/v4/summoners/by-puuid/${account.puuid}`,
+            { headers: { "X-Riot-Token": RIOT_API_KEY } }
         )
 
         if (!summonerRes.ok) {
@@ -69,12 +84,8 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
         const summonerData = await summonerRes.json()
 
         const liveRes = await fetch(
-            `https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/${account.puuid}`,
-            {
-                headers: {
-                    "X-Riot-Token": RIOT_API_KEY,
-                },
-            }
+            `https://${routing.platform}/lol/spectator/v5/active-games/by-summoner/${account.puuid}`,
+            { headers: { "X-Riot-Token": RIOT_API_KEY } }
         )
 
         console.log("🎮 Spectator response:", liveRes.status, await liveRes.text())
@@ -82,12 +93,8 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
         const isLive = liveRes.status === 200
 
         const rankedRes = await fetch(
-            `https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/${account.puuid}`,
-            {
-                headers: {
-                    "X-Riot-Token": RIOT_API_KEY,
-                },
-            }
+            `https://${routing.platform}/lol/league/v4/entries/by-puuid/${account.puuid}`,
+            { headers: { "X-Riot-Token": RIOT_API_KEY } }
         )
 
         if (!rankedRes.ok) {
@@ -151,6 +158,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
             peak_rank: peakRank,
             peak_lp: peakLP,
             last_searched_at: new Date().toISOString(),
+            region: region.toUpperCase(), 
         }, {
             onConflict: 'name,tag',
         })
