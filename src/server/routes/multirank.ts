@@ -4,7 +4,7 @@ import { getAccountByRiotId, getRankedDataBySummonerId } from "../riot"
 export async function getMultiRankHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json()
-    const { riotIds } = body as { riotIds: string[] }
+    const { riotIds, region } = body as { riotIds: string[]; region: string }
 
     if (!riotIds || !Array.isArray(riotIds)) {
       return new Response("Invalid riotIds", { status: 400 })
@@ -14,10 +14,10 @@ export async function getMultiRankHandler(req: Request): Promise<Response> {
       riotIds.map(async (fullRiotId) => {
         const [name, tag] = fullRiotId.split("#")
         try {
-          const account = await getAccountByRiotId(name, tag)
+          const account = await getAccountByRiotId(name, tag, region)
           console.log("📦 account result:", account.puuid)
 
-          const rankedData = await getRankedDataBySummonerId(account.puuid)
+          const rankedData = await getRankedDataBySummonerId(account.puuid, region)
           const solo = rankedData.find((entry: any) => entry.queueType === "RANKED_SOLO_5x5")
 
           return {

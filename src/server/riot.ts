@@ -6,16 +6,20 @@ const regionRouting = {
   EUW: {
     account: "europe.api.riotgames.com",
     match: "europe.api.riotgames.com",
+    platform: "euw1.api.riotgames.com",
   },
   NA: {
     account: "americas.api.riotgames.com",
     match: "americas.api.riotgames.com",
+    platform: "na1.api.riotgames.com",
   },
   KR: {
     account: "asia.api.riotgames.com",
     match: "asia.api.riotgames.com",
-  }
+    platform: "kr.api.riotgames.com",
+  },
 }
+
 
 
 export async function getAccountByRiotId(name: string, tag: string, region: string) {
@@ -54,14 +58,22 @@ export async function getMatchIdsByPuuid(puuid: string, region: string, count = 
   return res.json();
 }
 
-export async function getRankedDataBySummonerId(summonerId: string) {
+export async function getRankedDataBySummonerId(summonerId: string, region: string) {
   const RIOT_API_KEY = process.env.RIOT_API_KEY
-
   if (!RIOT_API_KEY) {
     throw new Error("RIOT_API_KEY non definita nel .env")
   }
 
-  const url = `https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/${summonerId}`
+  if (!region || typeof region !== "string") {
+    throw new Error("Missing or invalid region in getRankedDataBySummonerId")
+  }
+
+  const routing = regionRouting[region.toUpperCase()]
+  if (!routing?.platform) {
+    throw new Error(`Unsupported region: ${region}`)
+  }
+
+  const url = `https://${routing.platform}/lol/league/v4/entries/by-puuid/${summonerId}`
   console.log("📡 Chiamata API Ranked:", url)
 
   const response = await fetch(url, {
@@ -78,7 +90,6 @@ export async function getRankedDataBySummonerId(summonerId: string) {
 
   return await response.json()
 }
-
 
 export async function getMatchDetails(matchId: string, region: string) {
   const routing = regionRouting[region.toUpperCase()]

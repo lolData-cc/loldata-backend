@@ -1,22 +1,22 @@
-// src/server/routes/getLiveGame.ts
 import { getLiveGameByPuuid } from "../riot"
 import { saveLiveGame } from "@/server/supabase/queries"
 
 export async function getLiveGameHandler(req: Request): Promise<Response> {
   try {
-    const body = await req.json()
-    const { puuid } = body
+    const { puuid, region } = await req.json()
 
-    if (!puuid) return new Response("Missing puuid", { status: 400 })
+    if (!puuid || !region) {
+      return new Response("Missing puuid or region", { status: 400 })
+    }
 
-    const game = await getLiveGameByPuuid(puuid)
+    const game = await getLiveGameByPuuid(puuid, region)
     if (!game) return new Response("No active game", { status: 204 })
 
     await saveLiveGame(puuid, game.participants)
 
     return Response.json({ game })
   } catch (err) {
-    console.error("❌ Errore live game handler:", err)
+    console.error("❌ Errore live game  handler:", err)
     return new Response("Internal error", { status: 500 })
   }
 }

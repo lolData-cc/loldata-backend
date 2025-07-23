@@ -4,7 +4,8 @@
     "paths": {
       "@/*": ["src/*"]
     },
-    "types": ["bun-types"]
+    "types": ["bun-types"],
+    "lib": ["ES2015", "DOM"]
   },
   "files": [],
   "references": [

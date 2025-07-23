@@ -73,11 +73,18 @@ serve({
         headers: { "Content-Type": mime },
       })
     } catch (e) {
-      // Fallback SPA: ritorna index.html per tutte le rotte non trovate
-      const html = await readFile(join(distPath, "index.html"))
-      return new Response(html, {
-        headers: { "Content-Type": "text/html" },
-      })
+      if (pathname.startsWith("/api")) {
+        return new Response("API route not found", { status: 404 })
+      }
+
+      try {
+        const html = await readFile(join(distPath, "index.html"))
+        return new Response(html, {
+          headers: { "Content-Type": "text/html" },
+        })
+      } catch (e) {
+        return new Response("index.html not found", { status: 500 })
+      }
     }
   },
 })
