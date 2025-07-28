@@ -1,7 +1,7 @@
 import { serve } from "bun"
 import { join } from "path"
 import { readFile } from "fs/promises"
-
+import { checkProHandler } from "./routes/checkPro"
 import { getMatchesHandler } from "./routes/getMatches"
 import { getSummonerHandler } from "./routes/getSummoner"
 import { matchupsHandler } from "./routes/aihelp/matchups"
@@ -55,6 +55,8 @@ serve({
     if (pathname === "/api/assignroles" && req.method === "POST") return withCors(await getAssignedRolesHandler(req))
     if (pathname === "/api/aihelp/matchups" && req.method === "POST") return withCors(await matchupsHandler(req))
     if (pathname === "/api/autocomplete" && req.method === "POST") return withCors(await autocompleteHandler(req))
+    if (pathname === "/api/pro/check" && req.method === "POST") return withCors(await checkProHandler(req))
+
 
     // === FILE STATICI ===
     try {
