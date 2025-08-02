@@ -11,6 +11,7 @@ import { howToWinHandler } from "./routes/aihelp/howtowin"
 import { getMultiRankHandler } from "./routes/multirank"
 import { getAssignedRolesHandler } from "./routes/getAssignedRoles"
 import { autocompleteHandler } from "./routes/autocomplete"
+import { getMatchInfoHandler } from "./routes/getMatchInfo"
 
 const distPath = join(import.meta.dir, "../dist")
 
@@ -56,7 +57,7 @@ serve({
     if (pathname === "/api/aihelp/matchups" && req.method === "POST") return withCors(await matchupsHandler(req))
     if (pathname === "/api/autocomplete" && req.method === "POST") return withCors(await autocompleteHandler(req))
     if (pathname === "/api/pro/check" && req.method === "POST") return withCors(await checkProHandler(req))
-
+    if (pathname === "/api/matchinfo" && req.method === "POST")  return withCors(await getMatchInfoHandler(req))
 
     // === FILE STATICI ===
     try {
