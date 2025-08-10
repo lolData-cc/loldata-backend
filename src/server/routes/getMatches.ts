@@ -34,6 +34,10 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
       try {
         const match = await getMatchDetails(matchId, region)
 
+        const startTs = match.info.gameStartTimestamp ?? match.info.gameCreation;
+        if (startTs && match.info.gameDuration) {
+          match.info.gameEndTimestamp = startTs + match.info.gameDuration * 1000;
+        }
 
         const participant = match.info.participants.find(
           (p: any) => p.puuid === account.puuid

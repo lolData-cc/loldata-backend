@@ -12,6 +12,9 @@ import { getMultiRankHandler } from "./routes/multirank"
 import { getAssignedRolesHandler } from "./routes/getAssignedRoles"
 import { autocompleteHandler } from "./routes/autocomplete"
 import { getMatchInfoHandler } from "./routes/getMatchInfo"
+import { getMatchTimelineHandler } from "./routes/getMatchTimeline"
+import { getItemStatsHandler } from "./routes/getItemStats"
+import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 
 const distPath = join(import.meta.dir, "../dist")
 
@@ -57,8 +60,10 @@ serve({
     if (pathname === "/api/aihelp/matchups" && req.method === "POST") return withCors(await matchupsHandler(req))
     if (pathname === "/api/autocomplete" && req.method === "POST") return withCors(await autocompleteHandler(req))
     if (pathname === "/api/pro/check" && req.method === "POST") return withCors(await checkProHandler(req))
-    if (pathname === "/api/matchinfo" && req.method === "POST")  return withCors(await getMatchInfoHandler(req))
-
+    if (pathname === "/api/matchinfo" && req.method === "POST") return withCors(await getMatchInfoHandler(req))
+    if (pathname === "/api/matchtimeline" && req.method === "POST") return withCors(await getMatchTimelineHandler(req))
+    if (pathname === "/api/itemstats" && req.method === "POST") { return withCors(await getItemStatsHandler(req)) }
+    if (pathname === "/api/itembestutilizers" && req.method === "POST") { return withCors(await getItemBestUtilizersHandler(req))}
     // === FILE STATICI ===
     try {
       const filePath = join(distPath, pathname === "/" ? "index.html" : pathname)

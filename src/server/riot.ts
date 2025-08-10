@@ -145,4 +145,18 @@ export async function getLiveGameByPuuid(puuid: string, region: string) {
   return liveData
 }
 
+export async function getMatchTimeline(matchId: string, region: string) {
+  const routing = regionRouting[region.toUpperCase()]
+  const res = await fetch(`https://${routing.match}/lol/match/v5/matches/${matchId}/timeline`, {
+    headers: { "X-Riot-Token": RIOT_API_KEY },
+  })
+
+  if (!res.ok) {
+    const text = await res.text()
+    console.error("❌ Errore match timeline API:", res.status, text)
+    throw new Error("Errore nel recupero della timeline del match")
+  }
+
+  return await res.json()
+}
 

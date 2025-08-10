@@ -1,5 +1,4 @@
 import { getLiveGameByPuuid } from "../riot"
-import { saveLiveGame } from "@/server/supabase/queries"
 
 export async function getLiveGameHandler(req: Request): Promise<Response> {
   try {
@@ -12,7 +11,6 @@ export async function getLiveGameHandler(req: Request): Promise<Response> {
     const game = await getLiveGameByPuuid(puuid, region)
     if (!game) return new Response("No active game", { status: 204 })
 
-    await saveLiveGame(puuid, game.participants)
 
     return Response.json({ game })
   } catch (err) {

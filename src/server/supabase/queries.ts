@@ -11,17 +11,6 @@ type Participant = {
   perks: any
 }
 
-export async function saveLiveGame(puuid: string, participants: Participant[]) {
-  const { error } = await supabase
-    .from("live_games")
-    .insert([{ puuid, participants, created_at: new Date().toISOString() }])
-
-  if (error) {
-    console.error("Errore nel salvataggio live game:", error)
-    throw new Error(error.message)
-  }
-}
-
 
 export async function getChampionData(championId: number) {
   console.log("🔎 Cerco champion ID:", championId, typeof championId)

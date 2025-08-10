@@ -15,7 +15,7 @@ const regionRouting = {
     }
 }
 
-function rankToScore(tier: string, division: string, lp: number): number {
+function rankToScore(tier: string, division: string | undefined, lp: number): number {
     const tierOrder = [
         "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM",
         "EMERALD", "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER"
@@ -28,10 +28,9 @@ function rankToScore(tier: string, division: string, lp: number): number {
     }
 
     const base = tierOrder.indexOf(tier.toUpperCase()) * 1000
-    const divisionScore = divisionOrder[division.toUpperCase()] ?? 0
-    return base + divisionScore * 100 + lp // division pesa 100, lp è minore
+    const divisionScore = division ? (divisionOrder[division.toUpperCase()] ?? 0) : 0
+    return base + divisionScore * 100 + lp
 }
-
 export async function getSummonerHandler(req: Request): Promise<Response> {
     try {
         const body = await req.json()
