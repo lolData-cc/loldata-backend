@@ -5,7 +5,15 @@
       "@/*": ["src/*"]
     },
     "types": ["bun-types"],
-    "lib": ["ES2015", "DOM"]
+
+    // **qui il fix**: serve almeno ES2016; metto ES2020 per stare comodi
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    "strict": true,
+    "skipLibCheck": true
   },
   "files": [],
   "references": [
