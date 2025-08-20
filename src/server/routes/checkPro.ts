@@ -1,46 +1,54 @@
+// routes/checkPro.ts
 import { supabase } from "../supabase/client"
 
+function normalizeNametag(s: string) {
+  // trim, collassa spazi multipli, lowercase
+  return s.trim().replace(/\s+/g, " ").toLowerCase()
+}
+
 export async function checkProHandler(req: Request): Promise<Response> {
-  if (req.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 })
-  }
-
-  let body: any
   try {
-    body = await req.json()
-  } catch {
-    return new Response("Invalid JSON body", { status: 400 })
-  }
+    const body = await req.json()
+    const { nametag } = body as { nametag?: string }
 
-  // Supporta sia { nametag } che { name, tag }
-  let nametag: string | undefined = body?.nametag
-  const name: string | undefined = body?.name
-  const tag: string | undefined  = body?.tag
+    if (!nametag) return new Response("Missing nametag", { status: 400 })
 
-  if (!nametag) {
-    if (typeof name === "string" && typeof tag === "string" && name && tag) {
-      nametag = `${name}#${tag}`
+    const nametagNorm = normalizeNametag(nametag)
+
+    // 1) tenta match case-insensitive esatto
+    let { data, error } = await supabase
+      .from("profile_players")
+      .select("plan, nametag, region")
+      .ilike("nametag", nametagNorm) // ILIKE = case-insensitive
+      .maybeSingle()
+
+    // 2) (opzionale) fallback: se non trovato, prova ad eguagliare togliendo spazi extra dell'input
+    if (!data && !error) {
+      const compact = nametagNorm.replace(/\s+/g, " ")
+      const res2 = await supabase
+        .from("profile_players")
+        .select("plan, nametag, region")
+        .ilike("nametag", compact)
+        .maybeSingle()
+      data = res2.data
+      error = res2.error
     }
+
+    if (error) {
+      console.error("❌ checkPro error:", error.message)
+      return new Response("Errore checkPro", { status: 500 })
+    }
+
+    // Normalizza output: solo "premium" | "elite" oppure null
+    const planRaw = (data?.plan ?? null)
+    const plan =
+      typeof planRaw === "string" && ["premium", "elite"].includes(planRaw.toLowerCase())
+        ? (planRaw.toLowerCase() as "premium" | "elite")
+        : null
+
+    return Response.json({ plan }) // <-- niente "free" qui
+  } catch (e) {
+    console.error("❌ checkPro exception:", e)
+    return new Response("Errore checkPro", { status: 500 })
   }
-  if (!nametag || typeof nametag !== "string") {
-    return new Response("Missing nametag (or name+tag)", { status: 400 })
-  }
-
-  const normalized = nametag.toLowerCase().trim()
-
-  // pro_players.username contiene "GameName#TAG" (case-insensitive)
-  const { data, error } = await supabase
-    .from("pro_players")
-    .select("username")
-    .ilike("username", normalized)      // case-insensitive
-    .maybeSingle()
-
-  if (error && error.code !== "PGRST116") {
-    console.error("❌ Supabase error:", error)
-    return new Response("DB error", { status: 500 })
-  }
-
-  const isPro = !!data
-  // streamer lo lasci a false (o fai altra tabella/colonna)
-  return Response.json({ pro: isPro, streamer: false })
 }

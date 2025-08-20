@@ -92,7 +92,43 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     const rankedData = await rankedRes.json()
     const soloQueue = rankedData.find((e: any) => e.queueType === "RANKED_SOLO_5x5")
 
-    // Peak rank logic (come prima) ...
+    // ---- NEW: collega il profilo locale al puuid e leggi avatar_url ----
+    const nametag = `${account.gameName}#${account.tagLine}`
+    // prova a salvare il puuid se manca (matchando per nametag+region)
+    await supabase
+      .from("profile_players")
+      .update({ puuid: account.puuid })
+      .eq("nametag", nametag)
+      .eq("region", region.toLowerCase())
+      .is("puuid", null) // aggiorna solo se è null
+      .then(({ error }) => { if (error) console.warn("⚠️ update puuid:", error.message) })
+
+    // recupera l'avatar_url per questo puuid (o fallback per nametag+region)
+    let avatarUrl: string | null = null
+    {
+      const { data: rowByPuuid, error: e1 } = await supabase
+        .from("profile_players")
+        .select("avatar_url")
+        .eq("puuid", account.puuid)
+        .maybeSingle()
+      if (e1) console.warn("⚠️ select avatar by puuid:", e1.message)
+
+      if (rowByPuuid?.avatar_url) {
+        avatarUrl = rowByPuuid.avatar_url
+      } else {
+        const { data: rowByName, error: e2 } = await supabase
+          .from("profile_players")
+          .select("avatar_url")
+          .eq("nametag", nametag)
+          .eq("region", region.toLowerCase())
+          .maybeSingle()
+        if (e2) console.warn("⚠️ select avatar by nametag:", e2.message)
+        avatarUrl = rowByName?.avatar_url ?? null
+      }
+    }
+    // ---- /NEW ----
+
+    // Peak rank logic
     let peakRank = soloQueue ? `${soloQueue.tier} ${soloQueue.rank}` : "Unranked"
     let peakLP   = soloQueue?.leaguePoints ?? 0
     if (soloQueue) {
@@ -114,7 +150,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Oggetto risposta al frontend
+    // Risposta al frontend (🔸 includo avatar_url)
     const summoner = {
       name:  account.gameName,
       puuid: account.puuid,
@@ -128,26 +164,22 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       live:          isLive,
       peakRank,
       peakLp: peakLP,
+      avatar_url: avatarUrl, // ← NEW
     }
 
-    // 🔸 UP S E R T: salviamo anche il PUUID
+    // Upsert utente (come prima)
     const { error } = await supabase.from("users").upsert({
       name:  account.gameName,
       tag:   account.tagLine,
-      puuid: account.puuid,              // ← NEW
+      puuid: account.puuid,
       icon_id:  summonerData.profileIconId,
       rank:     summoner.rank,
       peak_rank: peakRank,
       peak_lp:   peakLP,
       last_searched_at: new Date().toISOString(),
       region: region.toUpperCase(),
-    }, {
-      onConflict: 'name,tag',            // aggiorna i vecchi record (aggiungendo il puuid)
-    })
-
-    if (error) {
-      console.error("❌ Errore salvataggio Supabase:", error.message)
-    }
+    }, { onConflict: 'name,tag' })
+    if (error) console.error("❌ Errore salvataggio Supabase:", error.message)
 
     return Response.json({ summoner, saved: true })
 

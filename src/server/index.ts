@@ -16,6 +16,8 @@ import { getMatchTimelineHandler } from "./routes/getMatchTimeline"
 import { getItemStatsHandler } from "./routes/getItemStats"
 import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
+import { getSeasonStatsHandler } from "./routes/season_stats";
+import { getLiveStreamersHandler } from "./twitch";
 
 const distPath = join(import.meta.dir, "../dist")
 
@@ -66,6 +68,8 @@ serve({
     if (pathname === "/api/itemstats" && req.method === "POST") { return withCors(await getItemStatsHandler(req)) }
     if (pathname === "/api/itembestutilizers" && req.method === "POST") { return withCors(await getItemBestUtilizersHandler(req))}
     if (pathname === "/api/champion/matchups" && req.method === "POST") { return withCors(await getChampionMatchupsHandler(req))}
+    if (pathname === "/api/season_stats" && req.method === "POST") return withCors(await getSeasonStatsHandler(req));
+    if (pathname === "/api/streamers/live" && req.method === "GET") { return withCors(await getLiveStreamersHandler(req));}
     // === FILE STATICI ===
     try {
       const filePath = join(distPath, pathname === "/" ? "index.html" : pathname)
