@@ -14,6 +14,12 @@ export function buildCacheKey(puuid: string, startEpoch: number, queueGroup: str
 }
 
 export async function readSeasonCache(cacheKey: string): Promise<SeasonStatsPayload | null> {
+  const { startTime, endTime } = getCurrentSeasonWindow();
+
+  const start_epoch = Number.isFinite(startTime as number) ? Math.floor(startTime as number) : null;
+// se la colonna è NOT NULL, scegli un default coerente (es. 0, o ‘inizio stagione noto’)
+const safe_start_epoch = start_epoch ?? 0; // <-- evita NULL
+
   const { data, error } = await supabase
     .from("season_stats_cache")
     .select("payload, expires_at")
