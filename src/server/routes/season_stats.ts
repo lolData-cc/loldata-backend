@@ -149,7 +149,13 @@ export async function getSeasonStatsHandler(req: Request): Promise<Response> {
   if (!puuid || !region) return new Response("Missing puuid/region", { status: 400 });
 
   const { startTime } = getCurrentSeasonWindow();
-  const cacheKey = buildCacheKey(puuid, startTime!, queueGroup);
+
+  // ✅ NON usare "startTime!" qui: fai un fallback sicuro
+  const startEpoch = Number.isFinite(startTime as number)
+    ? (startTime as number)
+    : 0; // fallback: 0 (o un tuo default stagionale)
+
+ const cacheKey = buildCacheKey(puuid, startEpoch, queueGroup);
 
   const fresh = await readSeasonCache(cacheKey);
   if (fresh) return Response.json(fresh, { status: 200 });
@@ -158,7 +164,8 @@ export async function getSeasonStatsHandler(req: Request): Promise<Response> {
 
   const runJob = async () => {
     const payload = await computeSeasonStats(puuid, region, queueGroup);
-    await writeSeasonCache(puuid, startTime!, queueGroup, payload);
+    // ✅ nuova firma: passa solo cacheKey + payload
+    await writeSeasonCache(cacheKey, payload);
   };
 
   if (!inFlight.has(cacheKey)) {

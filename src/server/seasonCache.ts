@@ -7,10 +7,19 @@ export type SeasonStatsPayload = {
   computedAt: number; // epoch ms
 };
 
-const DEFAULT_TTL_MS = 15 * 60 * 1000; // 15 minuti
+const DEFAULT_TTL_MS = 15 * 60 * 1000;
 
 export function buildCacheKey(puuid: string, startEpoch: number, queueGroup: string) {
   return `${puuid}:${startEpoch}:${queueGroup}`;
+}
+
+function parseCacheKey(cacheKey: string) {
+  const [puuid, startEpochStr, queueGroup] = cacheKey.split(":");
+  const startEpoch = Number(startEpochStr);
+  if (!puuid || !queueGroup || !Number.isFinite(startEpoch)) {
+    throw new Error(`[seasonCache] Invalid cacheKey: ${cacheKey}`);
+  }
+  return { puuid, startEpoch: Math.floor(startEpoch), queueGroup };
 }
 
 export async function readSeasonCache(cacheKey: string): Promise<SeasonStatsPayload | null> {
@@ -46,14 +55,17 @@ export async function readStaleSeasonCache(cacheKey: string): Promise<SeasonStat
   return data ? (data.payload as SeasonStatsPayload) : null;
 }
 
+/**
+ * Nuova firma: passa SOLO cacheKey (string), noi estraiamo puuid/startEpoch/queueGroup.
+ * Evita NULL su start_epoch e inconsistenze.
+ */
 export async function writeSeasonCache(
-  puuid: string,
-  startEpoch: number,
-  queueGroup: string,
+  cacheKey: string,
   payload: SeasonStatsPayload,
   ttlMs = DEFAULT_TTL_MS
 ) {
-  const cacheKey = buildCacheKey(puuid, startEpoch, queueGroup);
+  const { puuid, startEpoch, queueGroup } = parseCacheKey(cacheKey);
+
   const expiresAt = new Date(Date.now() + ttlMs).toISOString();
 
   const row = {
@@ -62,7 +74,7 @@ export async function writeSeasonCache(
     computed_at: new Date(payload.computedAt).toISOString(),
     expires_at: expiresAt,
     puuid,
-    start_epoch: startEpoch,
+    start_epoch: startEpoch,        // <- mai NULL
     queue_group: queueGroup,
   };
 
