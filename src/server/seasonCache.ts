@@ -14,12 +14,6 @@ export function buildCacheKey(puuid: string, startEpoch: number, queueGroup: str
 }
 
 export async function readSeasonCache(cacheKey: string): Promise<SeasonStatsPayload | null> {
-  const { startTime, endTime } = getCurrentSeasonWindow();
-
-  const start_epoch = Number.isFinite(startTime as number) ? Math.floor(startTime as number) : null;
-// se la colonna è NOT NULL, scegli un default coerente (es. 0, o ‘inizio stagione noto’)
-const safe_start_epoch = start_epoch ?? 0; // <-- evita NULL
-
   const { data, error } = await supabase
     .from("season_stats_cache")
     .select("payload, expires_at")
@@ -32,7 +26,7 @@ const safe_start_epoch = start_epoch ?? 0; // <-- evita NULL
   }
   if (!data) return null;
 
-  const expired = new Date(data.expires_at).getTime() < Date.now();
+  const expired = new Date(data.expires_at).getTime() <= Date.now();
   if (expired) return null;
 
   return data.payload as SeasonStatsPayload;
@@ -69,7 +63,7 @@ export async function writeSeasonCache(
     expires_at: expiresAt,
     puuid,
     start_epoch: startEpoch,
-    queue_group: queueGroup
+    queue_group: queueGroup,
   };
 
   const { error } = await supabase
