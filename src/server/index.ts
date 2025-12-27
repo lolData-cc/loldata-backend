@@ -22,8 +22,20 @@
   import { getSeasonStatsHandler } from "./routes/season_stats";
   import { getLiveStreamersHandler } from "./twitch";
   import { getLeaderboardHandler } from "./routes/leaderboard";
+  
 
-  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: "2024-06-20" });
+ const stripeSecretKey =
+  process.env.STRIPE_SECRET_KEY ?? process.env?.STRIPE_SECRET_KEY;
+
+if (!stripeSecretKey) {
+  console.error("❌ Missing STRIPE_SECRET_KEY env var (Railway config)");
+  // puoi anche fare throw se preferisci
+  throw new Error("Missing STRIPE_SECRET_KEY env var (Railway config)");
+}
+
+const stripe = new Stripe(stripeSecretKey, {
+  apiVersion: "2024-06-20",
+});
 
   const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
