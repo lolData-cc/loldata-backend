@@ -4,25 +4,52 @@ import { getCurrentSeasonWindow } from "../season";
 
 function delay(ms: number) { return new Promise(res => setTimeout(res, ms)); }
 
+const MAX_TOTAL = 30; // tetto assoluto: dopo 30 stop
+
 export async function getMatchesHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json();
     const { name, tag, region } = body;
+
+    // nuovi parametri per paging
+    const offset = Math.max(0, Number(body?.offset ?? 0));       // 0, 10, 20...
+    const limitReq = Math.max(1, Number(body?.limit ?? 10));     // default 10
+    const limit = Math.min(10, limitReq);  
+    
+
 
     if (!name || !tag || !region) {
       console.error("Missing name, tag or region");
       return new Response("Missing name, tag or region", { status: 400 });
     }
 
+    // se abbiamo già servito 30 o più, fermiamoci
+    if (offset >= MAX_TOTAL) {  
+      return Response.json({
+        matches: [],
+        topChampions: [],
+        seasonTotals: null,
+        hasMore: false,
+        nextOffset: offset
+      });
+    }
+
     const account = await getAccountByRiotId(name, tag, region);
 
-    // ✅ Solo ranked della season corrente, ma solo 10 ID (fast path)
+    // Solo ranked della season corrente (420/440)
     const { startTime, endTime } = getCurrentSeasonWindow();
+
+    // Calcola quanti possiamo ancora servire senza superare MAX_TOTAL
+    const remaining = Math.max(0, MAX_TOTAL - offset);
+    const count = Math.min(limit, remaining);
+
+    // usa start/count per paginare
     const ids = await getMatchIdsByPuuidOpts(account.puuid, region, {
-      count: 10,              // mostriamo sempre 10 in pagina
-      type: "ranked",         // ranked (copre 420/440)
-      startTime,              // 29 Apr 2025 00:00:00 UTC = 1745884800
-      endTime,                // opzionale, spesso undefined
+      start: offset,     // 0 per 1–10, 10 per 11–20, 20 per 21–30
+      count,             // fino a 10
+      type: "ranked",    // ranked (copre 420/440)
+      startTime,
+      endTime,
     });
 
     const matchesWithWin: any[] = [];
@@ -31,7 +58,7 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
       try {
         const match = await getMatchDetails(matchId, region);
 
-        // Normalizza endTimestamp per il componente
+        // Normalizza endTimestamp per il frontend
         const startTs = match.info.gameStartTimestamp ?? match.info.gameCreation;
         if (startTs && match.info.gameDuration) {
           match.info.gameEndTimestamp = startTs + match.info.gameDuration * 1000;
@@ -48,18 +75,25 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
         const championName = participant.championName ?? "Unknown";
         matchesWithWin.push({ match, win: !!participant.win, championName });
 
-        // piccolo respiro per limit (10 chiamate => sei tranquillo)
+        // piccolo respiro per non stressare i rate limit
         await delay(80);
       } catch (err) {
         console.error("❌ Errore nel match ID:", matchId, err);
       }
     }
 
-    // Compat frontend: niente stats qui (arriveranno da /api/season_stats)
+    const served = matchesWithWin.length;
+    const nextOffset = offset + served;
+
+    // hasMore: se abbiamo servito il "pieno" richiesto e non abbiamo superato MAX_TOTAL
+    const hasMore = nextOffset < MAX_TOTAL && served === count;
+
     return Response.json({
       matches: matchesWithWin,
-      topChampions: [],      // placeholder per non rompere la UI esistente
-      seasonTotals: null,    // idem
+      topChampions: [],      // compat con UI esistente
+      seasonTotals: null,    // compat con UI esistente
+      hasMore,
+      nextOffset,
     });
   } catch (err) {
     console.error("❌ Errore nel backend:", err);

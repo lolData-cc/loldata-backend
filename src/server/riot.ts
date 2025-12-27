@@ -11,7 +11,23 @@ export class RateLimitError extends Error {
   }
 }
 
+export type QueueApi =
+  | "RANKED_SOLO_5x5"
+  | "RANKED_FLEX_SR";
 
+export type LadderEntry = {
+  summonerId?: string;       // encryptedSummonerId (legacy)
+  puuid?: string;            // presente su alcune risposte
+  summonerName?: string;     // può mancare o essere legacy
+  leaguePoints: number;
+  wins: number;
+  losses: number;
+  hotStreak: boolean;
+  veteran: boolean;
+  freshBlood: boolean;
+  inactive: boolean;
+  tier: "CHALLENGER" | "GRANDMASTER" | "MASTER";
+};
 
 const regionRouting = {
   EUW: {
@@ -178,3 +194,73 @@ export async function getMatchTimeline(matchId: string, region: string) {
   return res.json();
 }
 
+export function platformHost(region: string) {
+  const r = (regionRouting as any)[region.toUpperCase()];
+  if (!r?.platform) throw new Error(`Unsupported region: ${region}`);
+  return r.platform as string;
+}
+export function accountHost(region: string) {
+  const r = (regionRouting as any)[region.toUpperCase()];
+  if (!r?.account) throw new Error(`Unsupported region: ${region}`);
+  return r.account as string;
+}
+
+export async function getSummonerByEncryptedId(encryptedSummonerId: string, region: string) {
+  const host = platformHost(region);
+  const url = `https://${host}/lol/summoner/v4/summoners/${encryptedSummonerId}`;
+  const res = await riotFetch(url);
+  return res.json(); // { id, accountId, puuid, name, profileIconId, ... }
+}
+
+export async function getAccountByPuuid(puuid: string, region: string) {
+  const host = accountHost(region);
+  const url = `https://${host}/riot/account/v1/accounts/by-puuid/${encodeURIComponent(puuid)}`;
+  const res = await riotFetch(url);
+  return res.json(); // { puuid, gameName, tagLine }
+}
+
+export async function getChallenger(queue: QueueApi, region: string) {
+  const host = platformHost(region);
+  const url = `https://${host}/lol/league/v4/challengerleagues/by-queue/${queue}`;
+  const res = await riotFetch(url);
+  const data = await res.json();
+  return (data.entries as any[]).map((e) => ({ ...e, tier: "CHALLENGER" })) as LadderEntry[];
+}
+
+export async function getGrandmaster(queue: QueueApi, region: string) {
+  const host = platformHost(region);
+  const url = `https://${host}/lol/league/v4/grandmasterleagues/by-queue/${queue}`;
+  const res = await riotFetch(url);
+  const data = await res.json();
+  return (data.entries as any[]).map((e) => ({ ...e, tier: "GRANDMASTER" })) as LadderEntry[];
+}
+
+export async function getMaster(queue: QueueApi, region: string) {
+  const host = platformHost(region);
+  const url = `https://${host}/lol/league/v4/masterleagues/by-queue/${queue}`;
+  const res = await riotFetch(url);
+  const data = await res.json();
+  return (data.entries as any[]).map((e) => ({ ...e, tier: "MASTER" })) as LadderEntry[];
+}
+
+export async function getTopLadder(queue: QueueApi, region: string) {
+  const [c, g, m] = await Promise.all([
+    getChallenger(queue, region),
+    getGrandmaster(queue, region),
+    getMaster(queue, region),
+  ]);
+  const rows = [...c, ...g, ...m]
+    .map((e) => ({
+      ...e,
+      winrate: e.wins + e.losses > 0 ? Math.round((e.wins / (e.wins + e.losses)) * 100) : 0,
+    }))
+    .sort((a, b) => b.leaguePoints - a.leaguePoints);
+  return rows;
+}
+
+export async function getSummonerByPuuid(puuid: string, region: string) {
+  const host = platformHost(region);
+  const url = `https://${host}/lol/summoner/v4/summoners/by-puuid/${encodeURIComponent(puuid)}`;
+  const res = await riotFetch(url);
+  return res.json(); // { puuid, profileIconId, name, ... }
+}

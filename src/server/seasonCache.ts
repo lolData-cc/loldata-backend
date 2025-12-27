@@ -9,17 +9,43 @@ export type SeasonStatsPayload = {
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
 
-export function buildCacheKey(puuid: string, startEpoch: number, queueGroup: string) {
-  return `${puuid}:${startEpoch}:${queueGroup}`;
+// ✅ per ora hard limit (così hai un solo punto di verità)
+export const DEFAULT_SEASON_STATS_LIMIT = 20;
+
+// ✅ nuova cacheKey include anche limit per non “sporcare” la cache quando un domani cambi logica
+export function buildCacheKey(
+  puuid: string,
+  startEpoch: number,
+  queueGroup: string,
+  limit: number = DEFAULT_SEASON_STATS_LIMIT
+) {
+  return `${puuid}:${startEpoch}:${queueGroup}:${limit}`;
 }
 
+// ✅ compatibilità: accetta sia vecchio formato (3 pezzi) sia nuovo (4 pezzi)
 function parseCacheKey(cacheKey: string) {
-  const [puuid, startEpochStr, queueGroup] = cacheKey.split(":");
+  const parts = cacheKey.split(":");
+
+  // old: puuid:startEpoch:queueGroup
+  // new: puuid:startEpoch:queueGroup:limit
+  const [puuid, startEpochStr, queueGroup, limitStr] = parts;
+
   const startEpoch = Number(startEpochStr);
-  if (!puuid || !queueGroup || !Number.isFinite(startEpoch)) {
+  const limit =
+    limitStr !== undefined && limitStr.length > 0
+      ? Number(limitStr)
+      : DEFAULT_SEASON_STATS_LIMIT;
+
+  if (!puuid || !queueGroup || !Number.isFinite(startEpoch) || !Number.isFinite(limit)) {
     throw new Error(`[seasonCache] Invalid cacheKey: ${cacheKey}`);
   }
-  return { puuid, startEpoch: Math.floor(startEpoch), queueGroup };
+
+  return {
+    puuid,
+    startEpoch: Math.floor(startEpoch),
+    queueGroup,
+    limit: Math.floor(limit),
+  };
 }
 
 export async function readSeasonCache(cacheKey: string): Promise<SeasonStatsPayload | null> {
@@ -56,7 +82,7 @@ export async function readStaleSeasonCache(cacheKey: string): Promise<SeasonStat
 }
 
 /**
- * Nuova firma: passa SOLO cacheKey (string), noi estraiamo puuid/startEpoch/queueGroup.
+ * Nuova firma: passa SOLO cacheKey (string), noi estraiamo puuid/startEpoch/queueGroup (+limit).
  * Evita NULL su start_epoch e inconsistenze.
  */
 export async function writeSeasonCache(
