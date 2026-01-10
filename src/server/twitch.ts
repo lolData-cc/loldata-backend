@@ -173,7 +173,13 @@ export async function getLiveStreamersHandler(_req: Request): Promise<Response> 
             if (!process.env[k]) throw new Error(`Missing env ${k}`);
         }
 
-        const live = await refreshStreamersLive();
+        const liveAll = await refreshStreamersLive();
+
+        // 🔥 tieni solo League of Legends
+        const live = liveAll.filter(
+            (s) => s.game_name === "League of Legends"
+        );
+
         live.sort((a, b) => (b.viewer_count ?? 0) - (a.viewer_count ?? 0));
 
         return new Response(JSON.stringify({ live }), {
