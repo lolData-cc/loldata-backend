@@ -24,6 +24,9 @@ import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getLiveStreamersHandler } from "./twitch";
 import { getLeaderboardHandler } from "./routes/leaderboard";
 import { getChampionItemsHandler } from "./routes/getChampionItems";
+import { getTotalMasteryHandler } from "./routes/getTotalMastery";
+import { getMasteryListHandler } from "./routes/getMasteryList";
+import { getChampionStatsHandler } from "./routes/getChampionStats";
 
 
 
@@ -312,6 +315,18 @@ if (pathname === "/api/billing/create-checkout-session" && req.method === "POST"
 
 if (pathname === "/api/champion/items" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionItemsHandler);
+}
+
+if (pathname === "/api/mastery/total" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getTotalMasteryHandler);
+}
+
+if (pathname === "/api/mastery/list" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getMasteryListHandler);
+}
+
+if (pathname === "/api/champion/stats" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getChampionStatsHandler);
 }
 
 // webhook Stripe: niente CORS, ma puoi comunque loggare
