@@ -1,20 +1,17 @@
-# Usa l'immagine ufficiale di Bun
-FROM oven/bun
+FROM oven/bun:latest
 
-# Imposta la working directory
 WORKDIR /app
 
-# Copia tutto il progetto nel container
+# Copia prima i manifest per sfruttare la cache
+COPY package.json bun.lockb* ./
+
+# Install ripetibile
+RUN bun install --frozen-lockfile
+
+# Copia il resto del progetto
 COPY . .
 
-# Installa le dipendenze
-RUN bun install
-
-# Costruisce il frontend (se necessario)
-RUN bun run build
-
-# ❗ Espone la porta giusta
+# Railway userà la PORT env; EXPOSE è solo informativo
 EXPOSE 3001
 
-# ❗ Usa bun run per eseguire correttamente
-CMD ["bun", "run", "src/server/index.ts"]
+CMD ["bun", "start"]
