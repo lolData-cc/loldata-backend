@@ -14,8 +14,8 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
     // nuovi parametri per paging
     const offset = Math.max(0, Number(body?.offset ?? 0));       // 0, 10, 20...
     const limitReq = Math.max(1, Number(body?.limit ?? 10));     // default 10
-    const limit = Math.min(10, limitReq);  
-    
+    const limit = Math.min(10, limitReq);
+
 
 
     if (!name || !tag || !region) {
@@ -24,7 +24,7 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
     }
 
     // se abbiamo già servito 30 o più, fermiamoci
-    if (offset >= MAX_TOTAL) {  
+    if (offset >= MAX_TOTAL) {
       return Response.json({
         matches: [],
         topChampions: [],
@@ -73,7 +73,12 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
         if (!participant) continue;
 
         const championName = participant.championName ?? "Unknown";
-        matchesWithWin.push({ match, win: !!participant.win, championName });
+
+        matchesWithWin.push({
+          match,
+          win: !!participant.win,
+          championName,
+        });
 
         // piccolo respiro per non stressare i rate limit
         await delay(80);

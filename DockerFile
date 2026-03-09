@@ -9,7 +9,7 @@ COPY package.json bun.lockb* ./
 RUN bun install --frozen-lockfile
 
 # Copia il resto del progetto
-COPY . .
+COPY . .    
 
 # Railway userà la PORT env; EXPOSE è solo informativo
 EXPOSE 3001

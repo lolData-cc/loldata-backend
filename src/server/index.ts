@@ -7,6 +7,7 @@ import { Buffer } from "buffer";
 import { logger } from "./logger";
 import { checkProHandler } from "./routes/checkPro"
 import { getMatchesHandler } from "./routes/getMatches"
+import { getMatchAnalysisHandler } from "./routes/getMatchAnalysis"
 import { getSummonerHandler } from "./routes/getSummoner"
 import { matchupsHandler } from "./routes/aihelp/matchups"
 import { getProfileViewsHandler } from "./routes/getViews"
@@ -239,6 +240,10 @@ serve({
     // === ROUTE API ===
 if (pathname === "/api/matches" && req.method === "POST") {
   return withLogAndCors(req, pathname, getMatchesHandler);
+}
+
+if (pathname === "/api/match/analysis" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getMatchAnalysisHandler);
 }
 
 if (pathname === "/api/summoner" && req.method === "POST") {
