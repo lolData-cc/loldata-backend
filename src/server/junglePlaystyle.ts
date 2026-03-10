@@ -4,6 +4,15 @@ export type JunglePlaystyleTag =
   | "played_for_both"
   | null;
 
+export type JungleStartingCamp =
+  | "blue"
+  | "red"
+  | "gromp"
+  | "wolves"
+  | "raptors"
+  | "krugs"
+  | null;
+
 type Position = {
   x: number;
   y: number;
@@ -31,10 +40,18 @@ type TimelineKillEvent = {
   position?: Position;
 };
 
+type TimelineParticipantFrame = {
+  participantId: number;
+  position?: Position;
+  jungleMinionsKilled: number;
+};
+
 type TimelineLike = {
   info?: {
     frames?: Array<{
+      timestamp?: number;
       events?: any[];
+      participantFrames?: Record<string, TimelineParticipantFrame>;
     }>;
   };
 };
@@ -53,6 +70,7 @@ export type JungleTeamPlaystyleResult = {
   tag: JunglePlaystyleTag;
   topsideCount: number;
   botsideCount: number;
+  startingCamp: JungleStartingCamp;
 };
 
 export type MatchJunglePlaystyleResult = {
@@ -136,6 +154,68 @@ function classifyJungleEventSide(
   return classifyMapSideByPosition(event.position);
 }
 
+// ── Starting camp detection ─────────────────────────────────────────
+
+type CampLocation = { name: JungleStartingCamp; x: number; y: number };
+
+const BLUE_SIDE_CAMPS: CampLocation[] = [
+  { name: "blue",    x: 3828,  y: 7578 },
+  { name: "gromp",   x: 2288,  y: 8428 },
+  { name: "wolves",  x: 3778,  y: 6478 },
+  { name: "red",     x: 7558,  y: 3778 },
+  { name: "raptors", x: 7060,  y: 5400 },
+  { name: "krugs",   x: 8388,  y: 2778 },
+];
+
+const RED_SIDE_CAMPS: CampLocation[] = [
+  { name: "blue",    x: 10822, y: 6828 },
+  { name: "gromp",   x: 12588, y: 6228 },
+  { name: "wolves",  x: 10978, y: 8178 },
+  { name: "red",     x: 7148,  y: 10828 },
+  { name: "raptors", x: 7820,  y: 9400 },
+  { name: "krugs",   x: 6378,  y: 11928 },
+];
+
+function distance(a: Position, b: Position): number {
+  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+/**
+ * Detects the jungler's starting camp by checking their position
+ * at the ~60s frame (camps spawn at 0:55 in S16).
+ */
+function detectStartingCamp(
+  timeline: TimelineLike,
+  jungler: ParticipantLike,
+  teamId: number
+): JungleStartingCamp {
+  const frames = timeline.info?.frames;
+  if (!frames || frames.length < 2) return null;
+
+  // frame index 1 = ~60s, right when camps spawn
+  const frame = frames[1];
+  const pFrame = frame?.participantFrames?.[String(jungler.participantId)];
+  if (!pFrame?.position) return null;
+
+  const camps = teamId === 100 ? BLUE_SIDE_CAMPS : RED_SIDE_CAMPS;
+
+  let closest: CampLocation | null = null;
+  let minDist = Infinity;
+
+  for (const camp of camps) {
+    const d = distance(pFrame.position, camp);
+    if (d < minDist) {
+      minDist = d;
+      closest = camp;
+    }
+  }
+
+  // threshold: if jungler is too far from any camp (~1500 units), something is off
+  if (!closest || minDist > 1500) return null;
+
+  return closest.name;
+}
+
 function getTeamJunglePlaystyle(
   match: MatchLike,
   timeline: TimelineLike,
@@ -172,12 +252,15 @@ function getTeamJunglePlaystyle(
     }
   }
 
+  const startingCamp = detectStartingCamp(timeline, jungler, teamId);
+
   return {
     participantId: jungler.participantId,
     teamId,
     tag: getFinalTag(topsideCount, botsideCount),
     topsideCount,
     botsideCount,
+    startingCamp,
   };
 }
 
