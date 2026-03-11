@@ -28,6 +28,7 @@ import { getChampionItemsHandler } from "./routes/getChampionItems";
 import { getTotalMasteryHandler } from "./routes/getTotalMastery";
 import { getMasteryListHandler } from "./routes/getMasteryList";
 import { getChampionStatsHandler } from "./routes/getChampionStats";
+import { analyzePlayerHandler } from "./routes/analyzePlayer";
 
 
 
@@ -244,6 +245,13 @@ if (pathname === "/api/matches" && req.method === "POST") {
 
 if (pathname === "/api/match/analysis" && req.method === "POST") {
   return withLogAndCors(req, pathname, getMatchAnalysisHandler);
+}
+
+if (pathname === "/api/player/analyze" && req.method === "POST") {
+  const started = Date.now();
+  const res = await analyzePlayerHandler(req);
+  logger.response(req, pathname, res.status, Date.now() - started);
+  return res;
 }
 
 if (pathname === "/api/summoner" && req.method === "POST") {

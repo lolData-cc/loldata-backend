@@ -11,6 +11,12 @@ export type JungleStartingCamp =
   | "wolves"
   | "raptors"
   | "krugs"
+  | "enemy_blue"
+  | "enemy_red"
+  | "enemy_gromp"
+  | "enemy_wolves"
+  | "enemy_raptors"
+  | "enemy_krugs"
   | null;
 
 type Position = {
@@ -64,6 +70,8 @@ type TeamRoleMap = {
   support?: ParticipantLike;
 };
 
+export type JungleInvade = "invade" | "no_invade" | null;
+
 export type JungleTeamPlaystyleResult = {
   participantId: number;
   teamId: number;
@@ -71,6 +79,7 @@ export type JungleTeamPlaystyleResult = {
   topsideCount: number;
   botsideCount: number;
   startingCamp: JungleStartingCamp;
+  invade: JungleInvade;
 };
 
 export type MatchJunglePlaystyleResult = {
@@ -183,6 +192,8 @@ function distance(a: Position, b: Position): number {
 /**
  * Detects the jungler's starting camp by checking their position
  * at the ~60s frame (camps spawn at 0:55 in S16).
+ * Checks both own and enemy camps — if closest camp is enemy's,
+ * returns "enemy_blue", "enemy_red", etc.
  */
 function detectStartingCamp(
   timeline: TimelineLike,
@@ -197,23 +208,80 @@ function detectStartingCamp(
   const pFrame = frame?.participantFrames?.[String(jungler.participantId)];
   if (!pFrame?.position) return null;
 
-  const camps = teamId === 100 ? BLUE_SIDE_CAMPS : RED_SIDE_CAMPS;
+  const ownCamps = teamId === 100 ? BLUE_SIDE_CAMPS : RED_SIDE_CAMPS;
+  const enemyCamps = teamId === 100 ? RED_SIDE_CAMPS : BLUE_SIDE_CAMPS;
 
-  let closest: CampLocation | null = null;
+  let closestName: JungleStartingCamp = null;
   let minDist = Infinity;
 
-  for (const camp of camps) {
+  for (const camp of ownCamps) {
     const d = distance(pFrame.position, camp);
     if (d < minDist) {
       minDist = d;
-      closest = camp;
+      closestName = camp.name;
+    }
+  }
+
+  for (const camp of enemyCamps) {
+    const d = distance(pFrame.position, camp);
+    if (d < minDist) {
+      minDist = d;
+      closestName = `enemy_${camp.name}` as JungleStartingCamp;
     }
   }
 
   // threshold: if jungler is too far from any camp (~1500 units), something is off
-  if (!closest || minDist > 1500) return null;
+  if (!closestName || minDist > 1500) return null;
 
-  return closest.name;
+  return closestName;
+}
+
+/**
+ * Detects if the jungler invaded the enemy jungle.
+ * A kill counts as an invade when ALL of these are true:
+ *  1. Happens before 5 minutes
+ *  2. Jungler is the killer (not just an assist)
+ *  3. Kill position is within 1500u of an enemy camp
+ *  4. Kill position is closer to the nearest enemy camp than
+ *     to the nearest own camp (filters out mid-lane / river fights)
+ */
+function detectInvade(
+  timeline: TimelineLike,
+  jungler: ParticipantLike,
+  teamId: number
+): JungleInvade {
+  const frames = timeline.info?.frames;
+  if (!frames) return null;
+
+  const INVADE_CUTOFF = 5 * 60 * 1000; // 5 minutes
+  const ownCamps = teamId === 100 ? BLUE_SIDE_CAMPS : RED_SIDE_CAMPS;
+  const enemyCamps = teamId === 100 ? RED_SIDE_CAMPS : BLUE_SIDE_CAMPS;
+
+  const nearestCampDist = (pos: Position, camps: CampLocation[]) =>
+    Math.min(...camps.map((c) => distance(pos, c)));
+
+  for (const frame of frames) {
+    for (const rawEvent of frame.events || []) {
+      if (rawEvent?.type !== "CHAMPION_KILL") continue;
+
+      const event = rawEvent as TimelineKillEvent;
+      if (event.timestamp > INVADE_CUTOFF) continue;
+      if (!event.position) continue;
+
+      // Only count kills where the jungler is the killer
+      if (event.killerId !== jungler.participantId) continue;
+
+      const distToEnemy = nearestCampDist(event.position, enemyCamps);
+      const distToOwn = nearestCampDist(event.position, ownCamps);
+
+      // Must be within 1500u of an enemy camp AND closer to enemy camps than own
+      if (distToEnemy < 1500 && distToEnemy < distToOwn) {
+        return "invade";
+      }
+    }
+  }
+
+  return "no_invade";
 }
 
 function getTeamJunglePlaystyle(
@@ -253,6 +321,7 @@ function getTeamJunglePlaystyle(
   }
 
   const startingCamp = detectStartingCamp(timeline, jungler, teamId);
+  const invade = detectInvade(timeline, jungler, teamId);
 
   return {
     participantId: jungler.participantId,
@@ -261,6 +330,7 @@ function getTeamJunglePlaystyle(
     topsideCount,
     botsideCount,
     startingCamp,
+    invade,
   };
 }
 
