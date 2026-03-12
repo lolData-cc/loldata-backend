@@ -27,7 +27,7 @@ import { getLeaderboardHandler } from "./routes/leaderboard";
 import { getChampionItemsHandler } from "./routes/getChampionItems";
 import { getTotalMasteryHandler } from "./routes/getTotalMastery";
 import { getMasteryListHandler } from "./routes/getMasteryList";
-import { getChampionStatsHandler } from "./routes/getChampionStats";
+import { getChampionStatsHandler, getAvailablePatchesHandler } from "./routes/getChampionStats";
 import { analyzePlayerHandler } from "./routes/analyzePlayer";
 
 
@@ -340,6 +340,10 @@ if (pathname === "/api/mastery/list" && req.method === "POST") {
 
 if (pathname === "/api/champion/stats" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionStatsHandler);
+}
+
+if (pathname === "/api/champion/patches" && req.method === "GET") {
+  return withLogAndCors(req, pathname, getAvailablePatchesHandler);
 }
 
 // webhook Stripe: niente CORS, ma puoi comunque loggare

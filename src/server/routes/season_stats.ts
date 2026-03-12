@@ -208,6 +208,33 @@ async function incrementalUpdateSeasonStats(opts: {
         p_duration_min: mins,
       });
 
+      // Apply matchup delta — find lane opponent by same position on enemy team
+      const myRole = me.teamPosition || me.individualPosition || "";
+      if (myRole) {
+        const enemyTeamId = me.teamId === 100 ? 200 : 100;
+        const laneOpponent = match.info.participants.find(
+          (p: any) =>
+            p.teamId === enemyTeamId &&
+            (p.teamPosition || p.individualPosition || "") === myRole
+        );
+        if (laneOpponent) {
+          const oppChamp = laneOpponent.championName ?? "Unknown";
+          await supabaseAdmin.rpc("season_apply_matchup_delta", {
+            p_puuid: puuid,
+            p_season_start: seasonStart,
+            p_queue_group: queueGroup,
+            p_region: region,
+            p_champion: champ,
+            p_opponent: oppChamp,
+            p_games: 1,
+            p_wins: me.win ? 1 : 0,
+            p_kills: me.kills ?? 0,
+            p_deaths: me.deaths ?? 0,
+            p_assists: me.assists ?? 0,
+          }).catch(() => {}); // non-fatal if table doesn't exist yet
+        }
+      }
+
       await delay(40);
     }
 
@@ -307,9 +334,52 @@ async function readSeasonStatsFromDb(opts: {
     { games: 0, wins: 0 }
   );
 
+  // Fetch per-champion matchup data (top 3 opponents per champion)
+  let matchups: Record<string, any[]> = {};
+  try {
+    const { data: matchupRows } = await supabaseAdmin
+      .from("season_champion_matchups")
+      .select("champion,opponent,games,wins,total_kills,total_deaths,total_assists")
+      .eq("puuid", puuid)
+      .eq("season_start", seasonStart)
+      .eq("queue_group", queueGroup);
+
+    if (matchupRows) {
+      // Group by champion, sort by games desc, take top 3
+      for (const r of matchupRows) {
+        if (!matchups[r.champion]) matchups[r.champion] = [];
+        const deaths = r.total_deaths ?? 0;
+        const kills = r.total_kills ?? 0;
+        const assists = r.total_assists ?? 0;
+        const kda = deaths > 0 ? ((kills + assists) / deaths).toFixed(2) : "Perfect";
+        const wr = r.games > 0 ? Math.round((r.wins / r.games) * 100) : 0;
+
+        matchups[r.champion].push({
+          opponent: r.opponent,
+          games: r.games,
+          wins: r.wins,
+          winrate: wr,
+          kills,
+          deaths,
+          assists,
+          kda,
+        });
+      }
+      // Sort each champion's matchups by games desc, keep top 3
+      for (const champ in matchups) {
+        matchups[champ] = matchups[champ]
+          .sort((a, b) => b.games - a.games)
+          .slice(0, 3);
+      }
+    }
+  } catch {
+    // Table may not exist yet — non-fatal
+  }
+
   return {
     topChampions,
     seasonTotals,
+    matchups,
     computedAt: Date.now(),
     ...(updating ? { updating: true } : {}),
   };

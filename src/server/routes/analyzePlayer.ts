@@ -90,6 +90,8 @@ export type PlayerAnalysisResult = {
     boots: string;
     count: number;
     pct: number;
+    wins: number;
+    winRate: number;
   }[];
 
   earlyGameAnalysis: {
@@ -443,6 +445,7 @@ function computeBootsDistribution(
   puuid: string
 ): PlayerAnalysisResult["bootsDistribution"] {
   const counts: Record<string, number> = {};
+  const wins: Record<string, number> = {};
   let totalWithBoots = 0;
 
   for (const m of matches) {
@@ -461,9 +464,11 @@ function computeBootsDistribution(
 
     if (foundBoots) {
       counts[foundBoots] = (counts[foundBoots] || 0) + 1;
+      if (p.win) wins[foundBoots] = (wins[foundBoots] || 0) + 1;
       totalWithBoots++;
     } else {
       counts["No Boots"] = (counts["No Boots"] || 0) + 1;
+      if (p.win) wins["No Boots"] = (wins["No Boots"] || 0) + 1;
     }
   }
 
@@ -472,6 +477,8 @@ function computeBootsDistribution(
       boots,
       count,
       pct: pct(count, matches.length),
+      wins: wins[boots] || 0,
+      winRate: pct(wins[boots] || 0, count),
     }))
     .sort((a, b) => b.count - a.count);
 }

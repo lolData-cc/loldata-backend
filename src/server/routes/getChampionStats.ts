@@ -1,14 +1,15 @@
 // src/routes/getChampionStats.ts
-import { supabase } from "../supabase/client";
+import { supabaseAdmin } from "../supabase/client";
 type ChampionStatsBody = {
   championId?: number | string;
   patch?: string | null;
+  region?: string | null;
   queueId?: number | null;
   role?: string | null;
   tier?: string | null;
   opponents?: { championId: number; role?: string | null; itemId?: number | null }[] | null;
 };
-const CACHE_TTL_MS = Number(process.env.CHAMP_STATS_CACHE_TTL_MS ?? "60000"); // 60s
+const CACHE_TTL_MS = Number(process.env.CHAMP_STATS_CACHE_TTL_MS ?? "300000"); // 5 min
 const _cache = new Map<string, { exp: number; value: unknown }>();
 function cacheGet(key: string) {
   const hit = _cache.get(key);
@@ -29,6 +30,26 @@ function safeJson(text: string) {
     return null;
   }
 }
+
+// ── resolve latest patch from DB (cached) ──────────────────
+let _latestPatch: { value: string; exp: number } | null = null;
+async function getLatestPatch(): Promise<string | null> {
+  if (_latestPatch && Date.now() < _latestPatch.exp) return _latestPatch.value;
+  const { data } = await supabaseAdmin
+    .from("matches")
+    .select("game_version")
+    .order("game_creation", { ascending: false })
+    .limit(1)
+    .single();
+  if (data?.game_version) {
+    // "15.13.548.9786" → "15.13"
+    const short = String(data.game_version).split(".").slice(0, 2).join(".");
+    // cache for 10 min — patch doesn't change often
+    _latestPatch = { value: short, exp: Date.now() + 600_000 };
+    return short;
+  }
+  return null;
+}
 export async function getChampionStatsHandler(req: Request): Promise<Response> {
   const requestId =
     req.headers.get("x-request-id") ||
@@ -38,7 +59,9 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
     const raw = await req.text();
     const body: ChampionStatsBody | null = raw ? (safeJson(raw) as any) : null;
     const championId = body?.championId;
-    const patch = body?.patch ?? null;
+    const rawPatch = body?.patch ?? null;
+    const patch = rawPatch || (await getLatestPatch());
+    const region = body?.region ?? null;
     const queueId = body?.queueId ?? 420;
     const role = body?.role ?? null;
     const tier = body?.tier ?? null;
@@ -51,7 +74,7 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
       return new Response("Invalid championId", { status: 400 });
     }
     const roleNorm = role ? String(role).toUpperCase() : null;
-    const cacheKey = `champStats:${champNum}:${patch ?? "any"}:${queueId}:${roleNorm ?? "any"}:${tier ?? "any"}:${JSON.stringify(opponents ?? [])}`;
+    const cacheKey = `champStats:${champNum}:${patch ?? "any"}:${region ?? "all"}:${queueId}:${roleNorm ?? "any"}:${tier ?? "any"}:${JSON.stringify(opponents ?? [])}`;
     const cached = cacheGet(cacheKey);
     if (cached) {
       return Response.json(cached, {
@@ -62,9 +85,10 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
       });
     }
     const t0 = Date.now();
-    const { data, error } = await supabase.rpc("get_champion_stats", {
+    const { data, error } = await supabaseAdmin.rpc("get_champion_stats", {
       p_champion_id: champNum,
       p_patch: patch,
+      p_region: region,
       p_queue_id: queueId ?? 420,
       p_role: roleNorm,
       p_tier: tier,
@@ -108,4 +132,33 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
       headers: { "x-request-id": requestId },
     });
   }
+}
+
+// ── GET available patches ──────────────────────────────────
+let _patchesCache: { value: string[]; exp: number } | null = null;
+export async function getAvailablePatchesHandler(_req: Request): Promise<Response> {
+  if (_patchesCache && Date.now() < _patchesCache.exp) {
+    return Response.json({ patches: _patchesCache.value });
+  }
+  const { data, error } = await supabaseAdmin
+    .from("matches")
+    .select("game_version")
+    .order("game_creation", { ascending: false })
+    .limit(500);
+  if (error || !data) {
+    return Response.json({ patches: [] });
+  }
+  // dedupe & shorten: "15.13.548.9786" → "15.13"
+  const seen = new Set<string>();
+  const patches: string[] = [];
+  for (const row of data) {
+    const short = String(row.game_version ?? "").split(".").slice(0, 2).join(".");
+    if (short && !seen.has(short)) {
+      seen.add(short);
+      patches.push(short);
+    }
+  }
+  // cache 10 min
+  _patchesCache = { value: patches, exp: Date.now() + 600_000 };
+  return Response.json({ patches });
 }
