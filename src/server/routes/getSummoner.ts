@@ -91,6 +91,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     }
     const rankedData = await rankedRes.json()
     const soloQueue = rankedData.find((e: any) => e.queueType === "RANKED_SOLO_5x5")
+    const flexQueue = rankedData.find((e: any) => e.queueType === "RANKED_FLEX_SR")
 
     // ---- NEW: collega il profilo locale al puuid e leggi avatar_url ----
     const nametag = `${account.gameName}#${account.tagLine}`
@@ -102,6 +103,14 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       .eq("region", region.toLowerCase())
       .is("puuid", null) // aggiorna solo se è null
       .then(({ error }) => { if (error) console.warn("⚠️ update puuid:", error.message) })
+
+    // Keep nametag in sync when a player changes their Riot ID
+    await supabase
+      .from("profile_players")
+      .update({ nametag })
+      .eq("puuid", account.puuid)
+      .neq("nametag", nametag)
+      .then(({ error }) => { if (error) console.warn("⚠️ update nametag:", error.message) })
 
     // recupera l'avatar_url per questo puuid (o fallback per nametag+region)
     let avatarUrl: string | null = null
@@ -131,14 +140,19 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     // Peak rank logic
     let peakRank = soloQueue ? `${soloQueue.tier} ${soloQueue.rank}` : "Unranked"
     let peakLP   = soloQueue?.leaguePoints ?? 0
-    if (soloQueue) {
+    let peakFlexRank = flexQueue ? `${flexQueue.tier} ${flexQueue.rank}` : "Unranked"
+    let peakFlexLP   = flexQueue?.leaguePoints ?? 0
+
+    {
       const { data: existingUser } = await supabase
         .from("users")
-        .select("peak_rank, peak_lp")
+        .select("peak_rank, peak_lp, peak_flex_rank, peak_flex_lp")
         .eq("name", account.gameName)
         .eq("tag", account.tagLine)
         .single()
-      if (existingUser?.peak_rank) {
+
+      // Solo peak
+      if (soloQueue && existingUser?.peak_rank) {
         const [savedTier, savedDivision] = existingUser.peak_rank.split(" ")
         const savedLP = existingUser.peak_lp ?? 0
         const currentScore = rankToScore(soloQueue.tier, soloQueue.rank, soloQueue.leaguePoints)
@@ -146,6 +160,18 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
         if (savedScore >= currentScore) {
           peakRank = existingUser.peak_rank
           peakLP   = savedLP
+        }
+      }
+
+      // Flex peak
+      if (flexQueue && existingUser?.peak_flex_rank) {
+        const [savedTier, savedDivision] = existingUser.peak_flex_rank.split(" ")
+        const savedLP = existingUser.peak_flex_lp ?? 0
+        const currentScore = rankToScore(flexQueue.tier, flexQueue.rank, flexQueue.leaguePoints)
+        const savedScore   = rankToScore(savedTier, savedDivision, savedLP)
+        if (savedScore >= currentScore) {
+          peakFlexRank = existingUser.peak_flex_rank
+          peakFlexLP   = savedLP
         }
       }
     }
@@ -164,6 +190,10 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       live:          isLive,
       peakRank,
       peakLp: peakLP,
+      flexRank: flexQueue ? `${flexQueue.tier} ${flexQueue.rank}` : "Unranked",
+      flexLp:   flexQueue?.leaguePoints ?? 0,
+      peakFlexRank: peakFlexRank,
+      peakFlexLp:   peakFlexLP,
       avatar_url: avatarUrl, // ← NEW
     }
 
@@ -174,8 +204,13 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       puuid: account.puuid,
       icon_id:  summonerData.profileIconId,
       rank:     summoner.rank,
+      lp:       soloQueue?.leaguePoints ?? 0,
       peak_rank: peakRank,
       peak_lp:   peakLP,
+      flex_rank: summoner.flexRank,
+      flex_lp:   flexQueue?.leaguePoints ?? 0,
+      peak_flex_rank: peakFlexRank,
+      peak_flex_lp:   peakFlexLP,
       last_searched_at: new Date().toISOString(),
       region: region.toUpperCase(),
     }, { onConflict: 'name,tag' })

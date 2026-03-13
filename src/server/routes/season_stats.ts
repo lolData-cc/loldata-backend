@@ -219,19 +219,21 @@ async function incrementalUpdateSeasonStats(opts: {
         );
         if (laneOpponent) {
           const oppChamp = laneOpponent.championName ?? "Unknown";
-          await supabaseAdmin.rpc("season_apply_matchup_delta", {
-            p_puuid: puuid,
-            p_season_start: seasonStart,
-            p_queue_group: queueGroup,
-            p_region: region,
-            p_champion: champ,
-            p_opponent: oppChamp,
-            p_games: 1,
-            p_wins: me.win ? 1 : 0,
-            p_kills: me.kills ?? 0,
-            p_deaths: me.deaths ?? 0,
-            p_assists: me.assists ?? 0,
-          }).catch(() => {}); // non-fatal if table doesn't exist yet
+          try {
+            await supabaseAdmin.rpc("season_apply_matchup_delta", {
+              p_puuid: puuid,
+              p_season_start: seasonStart,
+              p_queue_group: queueGroup,
+              p_region: region,
+              p_champion: champ,
+              p_opponent: oppChamp,
+              p_games: 1,
+              p_wins: me.win ? 1 : 0,
+              p_kills: me.kills ?? 0,
+              p_deaths: me.deaths ?? 0,
+              p_assists: me.assists ?? 0,
+            });
+          } catch {} // non-fatal if table/function doesn't exist yet
         }
       }
 
