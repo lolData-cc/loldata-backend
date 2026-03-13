@@ -48,6 +48,58 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     const nameLower = name.toLowerCase()
     const tagLower  = tag.toLowerCase()
 
+    // 0) Global cooldown check — if updated within 180s, return cached data
+    const COOLDOWN_S = 180
+    {
+      const { data: cachedUser } = await supabase
+        .from("users")
+        .select("name, tag, puuid, icon_id, rank, lp, peak_rank, peak_lp, flex_rank, flex_lp, peak_flex_rank, peak_flex_lp, last_searched_at, region")
+        .eq("name", name).eq("tag", tag)
+        .single()
+
+      if (cachedUser?.last_searched_at) {
+        const elapsed = (Date.now() - new Date(cachedUser.last_searched_at).getTime()) / 1000
+        if (elapsed < COOLDOWN_S) {
+          // Fetch avatar_url for cached response
+          let avatarUrl: string | null = null
+          if (cachedUser.puuid) {
+            const { data: row } = await supabase
+              .from("profile_players")
+              .select("avatar_url")
+              .eq("puuid", cachedUser.puuid)
+              .maybeSingle()
+            avatarUrl = row?.avatar_url ?? null
+          }
+
+          const summoner = {
+            name: cachedUser.name,
+            puuid: cachedUser.puuid,
+            tag: cachedUser.tag,
+            rank: cachedUser.rank ?? "Unranked",
+            lp: cachedUser.lp ?? 0,
+            wins: 0,
+            losses: 0,
+            profileIconId: cachedUser.icon_id,
+            level: 0,
+            live: false,
+            peakRank: cachedUser.peak_rank ?? "Unranked",
+            peakLp: cachedUser.peak_lp ?? 0,
+            flexRank: cachedUser.flex_rank ?? "Unranked",
+            flexLp: cachedUser.flex_lp ?? 0,
+            peakFlexRank: cachedUser.peak_flex_rank ?? "Unranked",
+            peakFlexLp: cachedUser.peak_flex_lp ?? 0,
+            avatar_url: avatarUrl,
+          }
+
+          return Response.json({
+            summoner,
+            saved: true,
+            cooldownRemaining: Math.ceil(COOLDOWN_S - elapsed),
+          })
+        }
+      }
+    }
+
     // 1) Account -> PUUID
     const accountRes = await fetch(
       `https://${routing.account}/riot/account/v1/accounts/by-riot-id/${nameLower}/${tagLower}`,
@@ -216,7 +268,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     }, { onConflict: 'name,tag' })
     if (error) console.error("❌ Errore salvataggio Supabase:", error.message)
 
-    return Response.json({ summoner, saved: true })
+    return Response.json({ summoner, saved: true, cooldownRemaining: COOLDOWN_S })
 
   } catch (err) {
     console.error("Errore in getSummonerHandler:", err)
