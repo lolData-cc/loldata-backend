@@ -12,6 +12,7 @@ import type {
   JungleInvade,
 } from "../junglePlaystyle";
 import { getCurrentSeasonWindow } from "../season";
+import { supabaseAdmin } from "../supabase/client";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -321,7 +322,8 @@ function computeJungleAnalysis(
     }
   }
 
-  if (jungleResults.length === 0) return undefined;
+  // Need at least 5 jungle games for meaningful stats
+  if (jungleResults.length < 5) return undefined;
 
   const total = jungleResults.length;
 
@@ -857,6 +859,7 @@ function generateCounterTips(
 export async function analyzePlayerHandler(
   req: Request
 ): Promise<Response> {
+  // ── Parse body first (can only consume req.json() once) ──
   let body: any;
   try {
     body = await req.json();
@@ -867,6 +870,54 @@ export async function analyzePlayerHandler(
   const { puuid, region } = body;
   if (!puuid || !region) {
     return new Response("Missing puuid or region", { status: 400 });
+  }
+
+  // ── Auth + usage gating ──
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+
+  if (!token) {
+    return Response.json({ error: "login_required" }, { status: 403 });
+  }
+
+  const { data: authData, error: authErr } = await supabaseAdmin.auth.getUser(token);
+  if (authErr || !authData.user) {
+    return Response.json({ error: "login_required" }, { status: 403 });
+  }
+
+  const userId = authData.user.id;
+
+  let { data: profile } = await supabaseAdmin
+    .from("profile_players")
+    .select("plan, analysis_uses_count")
+    .eq("profile_id", userId)
+    .maybeSingle();
+
+  // Auto-create a minimal profile_players row if none exists
+  if (!profile) {
+    const { data: inserted } = await supabaseAdmin
+      .from("profile_players")
+      .insert({ profile_id: userId, plan: "free", analysis_uses_count: 0 })
+      .select("plan, analysis_uses_count")
+      .single();
+    profile = inserted;
+  }
+
+  const userPlan = (profile?.plan ?? "free").toLowerCase();
+  const usesCount = profile?.analysis_uses_count ?? 0;
+
+  // Premium/Elite → unlimited
+  // Free → 1 trial
+  if (userPlan !== "premium" && userPlan !== "elite" && usesCount >= 1) {
+    return Response.json({ error: "limit_reached", uses: usesCount }, { status: 403 });
+  }
+
+  // Increment usage count for free users
+  if (userPlan !== "premium" && userPlan !== "elite") {
+    await supabaseAdmin
+      .from("profile_players")
+      .update({ analysis_uses_count: usesCount + 1 })
+      .eq("profile_id", userId);
   }
 
   const encoder = new TextEncoder();
@@ -895,8 +946,8 @@ export async function analyzePlayerHandler(
         let matchIds: string[];
         try {
           matchIds = await getMatchIdsByPuuidOpts(puuid, region, {
-            count: 20,
-            type: "ranked",
+            count: 40,
+            queue: 420,
             startTime,
             endTime,
           });
@@ -912,7 +963,7 @@ export async function analyzePlayerHandler(
         if (matchIds.length === 0) {
           send({
             type: "error",
-            message: "No ranked games found this season.",
+            message: "No Solo/Duo ranked games found this season.",
           });
           controller.close();
           return;
@@ -921,7 +972,7 @@ export async function analyzePlayerHandler(
         send({
           type: "progress",
           step: "MATCH_IDS_FOUND",
-          message: `>> Located ${matchIds.length} ranked games. Initiating deep scan...`,
+          message: `>> Located ${matchIds.length} Solo/Duo games. Initiating deep scan...`,
           total: matchIds.length,
         });
 
@@ -1156,4 +1207,30 @@ export async function analyzePlayerHandler(
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
     },
   });
+}
+
+// ── Analyze Status (GET) ─────────────────────────────────────────
+export async function analyzeStatusHandler(req: Request): Promise<Response> {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+
+  if (!token) {
+    return Response.json({ error: "login_required" }, { status: 403 });
+  }
+
+  const { data: authData, error: authErr } = await supabaseAdmin.auth.getUser(token);
+  if (authErr || !authData.user) {
+    return Response.json({ error: "login_required" }, { status: 403 });
+  }
+
+  const { data: profile } = await supabaseAdmin
+    .from("profile_players")
+    .select("plan, analysis_uses_count")
+    .eq("profile_id", authData.user.id)
+    .maybeSingle();
+
+  const plan = (profile?.plan ?? "free").toLowerCase();
+  const uses = profile?.analysis_uses_count ?? 0;
+
+  return Response.json({ plan, uses });
 }

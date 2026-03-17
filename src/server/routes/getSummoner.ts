@@ -1,4 +1,5 @@
 import { supabase } from '../supabase/client'
+import { ingestQuickThenBackground } from '../services/matchIngest'
 
 const regionRouting = {
     EUW: {
@@ -112,11 +113,22 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     }
     const account = await accountRes.json()
 
-    // 2) Summoner profile (icona/level)
-    const summonerRes = await fetch(
-      `https://${routing.platform}/lol/summoner/v4/summoners/by-puuid/${account.puuid}`,
-      { headers: { "X-Riot-Token": RIOT_API_KEY } }
-    )
+    // 2-4) Summoner profile, Live, Ranked — ALL IN PARALLEL
+    const [summonerRes, liveRes, rankedRes] = await Promise.all([
+      fetch(
+        `https://${routing.platform}/lol/summoner/v4/summoners/by-puuid/${account.puuid}`,
+        { headers: { "X-Riot-Token": RIOT_API_KEY } }
+      ),
+      fetch(
+        `https://${routing.platform}/lol/spectator/v5/active-games/by-summoner/${account.puuid}`,
+        { headers: { "X-Riot-Token": RIOT_API_KEY } }
+      ),
+      fetch(
+        `https://${routing.platform}/lol/league/v4/entries/by-puuid/${account.puuid}`,
+        { headers: { "X-Riot-Token": RIOT_API_KEY } }
+      ),
+    ])
+
     if (!summonerRes.ok) {
       const err = await summonerRes.text()
       console.error("❌ Errore profilo:", err)
@@ -124,18 +136,8 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     }
     const summonerData = await summonerRes.json()
 
-    // 3) Live
-    const liveRes = await fetch(
-      `https://${routing.platform}/lol/spectator/v5/active-games/by-summoner/${account.puuid}`,
-      { headers: { "X-Riot-Token": RIOT_API_KEY } }
-    )
     const isLive = liveRes.status === 200
 
-    // 4) Ranked
-    const rankedRes = await fetch(
-      `https://${routing.platform}/lol/league/v4/entries/by-puuid/${account.puuid}`,
-      { headers: { "X-Riot-Token": RIOT_API_KEY } }
-    )
     if (!rankedRes.ok) {
       const err = await rankedRes.text()
       console.error("❌ Errore ranked:", err)
@@ -145,49 +147,57 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     const soloQueue = rankedData.find((e: any) => e.queueType === "RANKED_SOLO_5x5")
     const flexQueue = rankedData.find((e: any) => e.queueType === "RANKED_FLEX_SR")
 
-    // ---- NEW: collega il profilo locale al puuid e leggi avatar_url ----
+    // ---- Parallel: profile sync + avatar fetch + peak rank fetch ----
     const nametag = `${account.gameName}#${account.tagLine}`
-    // prova a salvare il puuid se manca (matchando per nametag+region)
-    await supabase
+
+    // Fire-and-forget profile sync (non-blocking)
+    supabase
       .from("profile_players")
       .update({ puuid: account.puuid })
       .eq("nametag", nametag)
       .eq("region", region.toLowerCase())
-      .is("puuid", null) // aggiorna solo se è null
+      .is("puuid", null)
       .then(({ error }) => { if (error) console.warn("⚠️ update puuid:", error.message) })
 
-    // Keep nametag in sync when a player changes their Riot ID
-    await supabase
+    supabase
       .from("profile_players")
       .update({ nametag })
       .eq("puuid", account.puuid)
       .neq("nametag", nametag)
       .then(({ error }) => { if (error) console.warn("⚠️ update nametag:", error.message) })
 
-    // recupera l'avatar_url per questo puuid (o fallback per nametag+region)
-    let avatarUrl: string | null = null
-    {
-      const { data: rowByPuuid, error: e1 } = await supabase
+    // Parallel: avatar + peak rank
+    const [avatarResult, peakResult] = await Promise.all([
+      // Avatar: try by puuid first, fall back to nametag
+      supabase
         .from("profile_players")
         .select("avatar_url")
         .eq("puuid", account.puuid)
         .maybeSingle()
-      if (e1) console.warn("⚠️ select avatar by puuid:", e1.message)
+        .then(async ({ data, error }) => {
+          if (error) console.warn("⚠️ select avatar by puuid:", error.message)
+          if (data?.avatar_url) return data.avatar_url
+          // Fallback
+          const { data: rowByName, error: e2 } = await supabase
+            .from("profile_players")
+            .select("avatar_url")
+            .eq("nametag", nametag)
+            .eq("region", region.toLowerCase())
+            .maybeSingle()
+          if (e2) console.warn("⚠️ select avatar by nametag:", e2.message)
+          return rowByName?.avatar_url ?? null
+        }),
+      // Peak rank
+      supabase
+        .from("users")
+        .select("peak_rank, peak_lp, peak_flex_rank, peak_flex_lp")
+        .eq("name", account.gameName)
+        .eq("tag", account.tagLine)
+        .single(),
+    ])
 
-      if (rowByPuuid?.avatar_url) {
-        avatarUrl = rowByPuuid.avatar_url
-      } else {
-        const { data: rowByName, error: e2 } = await supabase
-          .from("profile_players")
-          .select("avatar_url")
-          .eq("nametag", nametag)
-          .eq("region", region.toLowerCase())
-          .maybeSingle()
-        if (e2) console.warn("⚠️ select avatar by nametag:", e2.message)
-        avatarUrl = rowByName?.avatar_url ?? null
-      }
-    }
-    // ---- /NEW ----
+    const avatarUrl: string | null = avatarResult
+    const existingUser = peakResult.data
 
     // Peak rank logic
     let peakRank = soloQueue ? `${soloQueue.tier} ${soloQueue.rank}` : "Unranked"
@@ -196,12 +206,6 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     let peakFlexLP   = flexQueue?.leaguePoints ?? 0
 
     {
-      const { data: existingUser } = await supabase
-        .from("users")
-        .select("peak_rank, peak_lp, peak_flex_rank, peak_flex_lp")
-        .eq("name", account.gameName)
-        .eq("tag", account.tagLine)
-        .single()
 
       // Solo peak
       if (soloQueue && existingUser?.peak_rank) {
@@ -267,6 +271,12 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       region: region.toUpperCase(),
     }, { onConflict: 'name,tag' })
     if (error) console.error("❌ Errore salvataggio Supabase:", error.message)
+
+    // Fire ingestion in background — don't block the summoner response.
+    // The frontend polls /api/matches with ingesting flag until matches appear.
+    ingestQuickThenBackground(account.puuid, region).catch((e) =>
+      console.error("⚠️ Quick ingestion error:", e)
+    );
 
     return Response.json({ summoner, saved: true, cooldownRemaining: COOLDOWN_S })
 
