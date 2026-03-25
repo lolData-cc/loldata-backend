@@ -29,6 +29,7 @@ import { getTotalMasteryHandler } from "./routes/getTotalMastery";
 import { getMasteryListHandler } from "./routes/getMasteryList";
 import { getChampionStatsHandler, getAvailablePatchesHandler } from "./routes/getChampionStats";
 import { analyzePlayerHandler, analyzeStatusHandler } from "./routes/analyzePlayer";
+import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlist";
 
 
 
@@ -218,6 +219,7 @@ async function withLogAndCors(
 
 serve({
   port: PORT,
+  idleTimeout: 120,
   async fetch(req) {
     const started = Date.now();
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
@@ -348,6 +350,14 @@ if (pathname === "/api/champion/stats" && req.method === "POST") {
 
 if (pathname === "/api/champion/patches" && req.method === "GET") {
   return withLogAndCors(req, pathname, getAvailablePatchesHandler);
+}
+
+if (pathname === "/api/tierlist/snapshot" && req.method === "POST") {
+  return withLogAndCors(req, pathname, generateSnapshotHandler);
+}
+
+if (pathname === "/api/tierlist" && req.method === "GET") {
+  return withLogAndCors(req, pathname, getTierlistHandler);
 }
 
 // webhook Stripe: niente CORS, ma puoi comunque loggare

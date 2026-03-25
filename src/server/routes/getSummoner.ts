@@ -1,5 +1,6 @@
 import { supabase } from '../supabase/client'
 import { ingestQuickThenBackground } from '../services/matchIngest'
+import { getTopLadder } from '../riot'
 
 const regionRouting = {
     EUW: {
@@ -32,6 +33,27 @@ function rankToScore(tier: string, division: string | undefined, lp: number): nu
     const divisionScore = division ? (divisionOrder[division.toUpperCase()] ?? 0) : 0
     return base + divisionScore * 100 + lp
 }
+
+// ── Cached apex ladder for rank position lookup ──
+const APEX_TIERS = new Set(["MASTER", "GRANDMASTER", "CHALLENGER"])
+let ladderCache: { data: any[]; ts: number; region: string } | null = null
+const LADDER_CACHE_TTL = 5 * 60 * 1000 // 5 min
+
+async function getLadderPosition(puuid: string, tier: string, region: string): Promise<number | null> {
+  if (!APEX_TIERS.has(tier.toUpperCase())) return null
+  try {
+    if (!ladderCache || Date.now() - ladderCache.ts > LADDER_CACHE_TTL || ladderCache.region !== region.toUpperCase()) {
+      const rows = await getTopLadder("RANKED_SOLO_5x5", region)
+      ladderCache = { data: rows, ts: Date.now(), region: region.toUpperCase() }
+    }
+    const idx = ladderCache.data.findIndex((e: any) => e.puuid === puuid)
+    return idx >= 0 ? idx + 1 : null
+  } catch (err) {
+    console.warn("⚠️ Ladder position lookup failed:", err)
+    return null
+  }
+}
+
 export async function getSummonerHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json()
@@ -72,6 +94,12 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
             avatarUrl = row?.avatar_url ?? null
           }
 
+          // Ladder position for cached Master+ users
+          const cachedTier = (cachedUser.rank ?? "").split(" ")[0]?.toUpperCase()
+          const cachedLadderRank = cachedUser.puuid && APEX_TIERS.has(cachedTier)
+            ? await getLadderPosition(cachedUser.puuid, cachedTier, region).catch(() => null)
+            : null
+
           const summoner = {
             name: cachedUser.name,
             puuid: cachedUser.puuid,
@@ -90,6 +118,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
             peakFlexRank: cachedUser.peak_flex_rank ?? "Unranked",
             peakFlexLp: cachedUser.peak_flex_lp ?? 0,
             avatar_url: avatarUrl,
+            ladderRank: cachedLadderRank,
           }
 
           return Response.json({
@@ -232,7 +261,12 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Risposta al frontend (🔸 includo avatar_url)
+    // Ladder position for Master+ (non-blocking, best-effort)
+    const ladderRank = soloQueue && APEX_TIERS.has(soloQueue.tier?.toUpperCase())
+      ? await getLadderPosition(account.puuid, soloQueue.tier, region).catch(() => null)
+      : null
+
+    // Risposta al frontend
     const summoner = {
       name:  account.gameName,
       puuid: account.puuid,
@@ -250,7 +284,8 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       flexLp:   flexQueue?.leaguePoints ?? 0,
       peakFlexRank: peakFlexRank,
       peakFlexLp:   peakFlexLP,
-      avatar_url: avatarUrl, // ← NEW
+      avatar_url: avatarUrl,
+      ladderRank,
     }
 
     // Upsert utente (come prima)

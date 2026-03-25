@@ -6,6 +6,7 @@
 import { getMatchDetails, getMatchIdsByPuuidOpts } from "../riot";
 import { getCurrentSeasonWindow } from "../season";
 import { supabaseAdmin } from "../supabase/client";
+import { markIngesting, markDone } from "./ingestionTracker";
 
 const Q_SOLO = 420;
 const Q_FLEX = 440;
@@ -480,46 +481,59 @@ export async function ingestQuickThenBackground(
   puuid: string,
   region: string
 ): Promise<void> {
-  const { startTime, endTime } = getCurrentSeasonWindow();
-  const seasonStart = Number(startTime ?? 0);
-  const seasonEnd = endTime ?? null;
+  markIngesting(puuid);
 
-  // 1. Fetch first page of match IDs from Riot (newest first)
-  const firstPageIds = await getMatchIdsByPuuidOpts(puuid, region, {
-    start: 0,
-    count: QUICK_BATCH,
-    type: "ranked",
-    startTime,
-    endTime,
-  });
+  try {
+    const { startTime, endTime } = getCurrentSeasonWindow();
+    const seasonStart = Number(startTime ?? 0);
+    const seasonEnd = endTime ?? null;
 
-  if (!firstPageIds?.length) return;
+    // 1. Fetch first page of match IDs from Riot (newest first)
+    const firstPageIds = await getMatchIdsByPuuidOpts(puuid, region, {
+      start: 0,
+      count: QUICK_BATCH,
+      type: "ranked",
+      startTime,
+      endTime,
+    });
 
-  // 2. Check which of these already exist in DB
-  const { data: existingRows } = await supabaseAdmin
-    .from("participants")
-    .select("match_id")
-    .eq("puuid", puuid)
-    .in("match_id", firstPageIds);
+    if (!firstPageIds?.length) {
+      markDone(puuid);
+      return;
+    }
 
-  const existingIds = new Set((existingRows ?? []).map((r) => r.match_id));
-  const newQuickIds = firstPageIds.filter((id) => !existingIds.has(id));
+    // 2. Check which of these already exist in DB
+    const { data: existingRows } = await supabaseAdmin
+      .from("participants")
+      .select("match_id")
+      .eq("puuid", puuid)
+      .in("match_id", firstPageIds);
 
-  // 3. Ingest the new ones synchronously (awaited — blocks getSummoner response)
-  if (newQuickIds.length > 0) {
-    console.log(`⚡ Quick-ingesting ${newQuickIds.length} newest matches for ${puuid}`);
-    for (const matchId of newQuickIds) {
-      try {
-        await ingestSingleMatch(matchId, puuid, region, seasonStart, seasonEnd);
-        await delay(50);
-      } catch (err) {
-        console.error(`❌ Quick ingest error for ${matchId}:`, err);
+    const existingIds = new Set((existingRows ?? []).map((r) => r.match_id));
+    const newQuickIds = firstPageIds.filter((id) => !existingIds.has(id));
+
+    // 3. Ingest the new ones synchronously
+    if (newQuickIds.length > 0) {
+      console.log(`⚡ Quick-ingesting ${newQuickIds.length} newest matches for ${puuid}`);
+      for (const matchId of newQuickIds) {
+        try {
+          await ingestSingleMatch(matchId, puuid, region, seasonStart, seasonEnd);
+          await delay(50);
+        } catch (err) {
+          console.error(`❌ Quick ingest error for ${matchId}:`, err);
+        }
       }
     }
-  }
 
-  // 4. Full ingestion in background (will skip already-ingested matches)
-  ingestPlayerMatches(puuid, region).catch((e) =>
-    console.error("⚠️ Background match ingestion error:", e)
-  );
+    // Mark quick phase done — frontend can now show partial results
+    markDone(puuid);
+
+    // 4. Full ingestion in background (will skip already-ingested matches)
+    ingestPlayerMatches(puuid, region).catch((e) =>
+      console.error("⚠️ Background match ingestion error:", e)
+    );
+  } catch (err) {
+    markDone(puuid);
+    throw err;
+  }
 }
