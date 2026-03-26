@@ -30,6 +30,7 @@ import { getMasteryListHandler } from "./routes/getMasteryList";
 import { getChampionStatsHandler, getAvailablePatchesHandler } from "./routes/getChampionStats";
 import { analyzePlayerHandler, analyzeStatusHandler } from "./routes/analyzePlayer";
 import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlist";
+import { learnOverviewHandler } from "./routes/learn/overview";
 
 
 
@@ -358,6 +359,11 @@ if (pathname === "/api/tierlist/snapshot" && req.method === "POST") {
 
 if (pathname === "/api/tierlist" && req.method === "GET") {
   return withLogAndCors(req, pathname, getTierlistHandler);
+}
+
+// ── Learn endpoints ──
+if (pathname === "/api/learn/overview" && req.method === "POST") {
+  return withLogAndCors(req, pathname, learnOverviewHandler);
 }
 
 // webhook Stripe: niente CORS, ma puoi comunque loggare
