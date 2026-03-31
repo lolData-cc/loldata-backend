@@ -24,7 +24,7 @@ export async function riotAuthUrlHandler(req: Request): Promise<Response> {
   url.searchParams.set("redirect_uri", REDIRECT_URI);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", "openid offline_access cpid");
-  url.searchParams.set("prompt", "login");
+  // prompt=consent re-shows the authorization screen without forcing password re-entry
 
   return Response.json({ url: url.toString() });
 }
