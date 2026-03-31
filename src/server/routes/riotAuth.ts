@@ -29,128 +29,193 @@ export async function riotAuthUrlHandler(req: Request): Promise<Response> {
 }
 
 /**
+ * Exchanges Riot auth code for access token and fetches account info.
+ */
+async function exchangeRiotCode(code: string) {
+  const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
+
+  const tokenRes = await fetch("https://auth.riotgames.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Authorization": `Basic ${basicAuth}`,
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: REDIRECT_URI,
+    }).toString(),
+  });
+
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text();
+    console.error("Riot token exchange failed:", tokenRes.status, errText);
+    throw new Error("Failed to exchange auth code");
+  }
+
+  const tokenData = await tokenRes.json();
+  const accessToken = tokenData.access_token;
+  if (!accessToken) throw new Error("No access token received");
+
+  // Get account info
+  const accountRes = await fetch(
+    "https://europe.api.riotgames.com/riot/account/v1/accounts/me",
+    { headers: { "Authorization": `Bearer ${accessToken}` } }
+  );
+  if (!accountRes.ok) throw new Error("Failed to fetch Riot account");
+
+  const account = await accountRes.json();
+  const { puuid, gameName, tagLine } = account;
+  if (!puuid || !gameName) throw new Error("Invalid account data");
+
+  // Get region via cpid
+  let region = "euw";
+  try {
+    const userinfoRes = await fetch("https://auth.riotgames.com/userinfo", {
+      headers: { "Authorization": `Bearer ${accessToken}` },
+    });
+    if (userinfoRes.ok) {
+      const userinfo = await userinfoRes.json();
+      const cpid = userinfo.cpid || userinfo.sub_cpid;
+      if (cpid && PLATFORM_TO_REGION[cpid.toUpperCase()]) {
+        region = PLATFORM_TO_REGION[cpid.toUpperCase()];
+      }
+    }
+  } catch {}
+
+  return { puuid, gameName, tagLine, region };
+}
+
+/**
  * POST /api/auth/riot/callback
- * Body: { code: string, userId: string }
- * Exchanges the auth code for tokens, fetches account info, updates profile.
+ * Body: { code: string, userId?: string, mode?: "link" | "login" }
+ *
+ * mode="link": Links Riot to existing Supabase user (requires userId)
+ * mode="login": Creates or finds Supabase user, returns session tokens
  */
 export async function riotAuthCallbackHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json();
-    const { code, userId } = body;
+    const { code, userId, mode = userId ? "link" : "login" } = body;
 
-    if (!code || !userId) {
-      return new Response("Missing code or userId", { status: 400 });
-    }
+    if (!code) return new Response("Missing code", { status: 400 });
 
-    // Step 1: Exchange auth code for access token
-    const basicAuth = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
-
-    const tokenRes = await fetch("https://auth.riotgames.com/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": `Basic ${basicAuth}`,
-      },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: REDIRECT_URI,
-      }).toString(),
-    });
-
-    if (!tokenRes.ok) {
-      const errText = await tokenRes.text();
-      console.error("Riot token exchange failed:", tokenRes.status, errText);
-      return new Response("Failed to exchange auth code", { status: 502 });
-    }
-
-    const tokenData = await tokenRes.json();
-    const accessToken = tokenData.access_token;
-
-    if (!accessToken) {
-      console.error("No access_token in response:", tokenData);
-      return new Response("No access token received", { status: 502 });
-    }
-
-    // Step 2: Get account info (puuid, gameName, tagLine)
-    const accountRes = await fetch(
-      "https://europe.api.riotgames.com/riot/account/v1/accounts/me",
-      { headers: { "Authorization": `Bearer ${accessToken}` } }
-    );
-
-    if (!accountRes.ok) {
-      const errText = await accountRes.text();
-      console.error("Riot account fetch failed:", accountRes.status, errText);
-      return new Response("Failed to fetch Riot account", { status: 502 });
-    }
-
-    const account = await accountRes.json();
-    const { puuid, gameName, tagLine } = account;
-
-    if (!puuid || !gameName) {
-      return new Response("Invalid account data from Riot", { status: 502 });
-    }
-
-    // Step 3: Get platform/region via userinfo (cpid scope)
-    let region = "euw"; // default fallback
-    try {
-      const userinfoRes = await fetch("https://auth.riotgames.com/userinfo", {
-        headers: { "Authorization": `Bearer ${accessToken}` },
-      });
-      if (userinfoRes.ok) {
-        const userinfo = await userinfoRes.json();
-        const cpid = userinfo.cpid || userinfo.sub_cpid;
-        if (cpid && PLATFORM_TO_REGION[cpid.toUpperCase()]) {
-          region = PLATFORM_TO_REGION[cpid.toUpperCase()];
-        }
-      }
-    } catch (e) {
-      console.warn("Failed to get cpid, defaulting to EUW:", e);
-    }
-
+    // Exchange code for Riot account info
+    const { puuid, gameName, tagLine, region } = await exchangeRiotCode(code);
     const nametag = `${gameName}#${tagLine}`;
+    const riotEmail = `riot_${puuid.slice(0, 16)}@riot.loldata.cc`;
 
-    // Step 4: Update profile_players table
-    const { data: existing } = await supabaseAdmin
+    if (mode === "link" && userId) {
+      // ── LINK MODE: attach Riot to existing Supabase user ──
+      const { data: existing } = await supabaseAdmin
+        .from("profile_players")
+        .select("profile_id")
+        .eq("profile_id", userId)
+        .maybeSingle();
+
+      if (existing) {
+        await supabaseAdmin
+          .from("profile_players")
+          .update({ puuid, nametag, region })
+          .eq("profile_id", userId);
+      } else {
+        await supabaseAdmin
+          .from("profile_players")
+          .insert({ profile_id: userId, player_id: userId, puuid, nametag, region });
+      }
+
+      console.log(`Riot RSO linked: ${nametag} (${region}) → user ${userId}`);
+      return Response.json({ success: true, nametag, region, puuid, gameName, tagLine });
+    }
+
+    // ── LOGIN MODE: create or find Supabase user ──
+
+    // Check if a user with this puuid already exists in profile_players
+    const { data: existingProfile } = await supabaseAdmin
       .from("profile_players")
       .select("profile_id")
-      .eq("profile_id", userId)
+      .eq("puuid", puuid)
       .maybeSingle();
 
-    if (existing) {
-      const { error } = await supabaseAdmin
-        .from("profile_players")
-        .update({ puuid, nametag, region })
-        .eq("profile_id", userId);
+    let supabaseUserId: string;
 
-      if (error) {
-        console.error("Failed to update profile_players:", error);
-        return new Response("Failed to update profile", { status: 500 });
-      }
+    if (existingProfile) {
+      // User already exists — sign them in
+      supabaseUserId = existingProfile.profile_id;
     } else {
-      const { error } = await supabaseAdmin
-        .from("profile_players")
-        .insert({ profile_id: userId, player_id: userId, puuid, nametag, region });
+      // Check if a Supabase user with the riot email exists
+      const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
+      const existingUser = userList?.users?.find(u => u.email === riotEmail);
 
-      if (error) {
-        console.error("Failed to insert profile_players:", error);
-        return new Response("Failed to create profile", { status: 500 });
+      if (existingUser) {
+        supabaseUserId = existingUser.id;
+      } else {
+        // Create new Supabase user
+        const randomPassword = crypto.randomUUID() + crypto.randomUUID();
+        const { data: newUser, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+          email: riotEmail,
+          password: randomPassword,
+          email_confirm: true,
+          user_metadata: {
+            riot_puuid: puuid,
+            riot_nametag: nametag,
+            riot_region: region,
+          },
+        });
+
+        if (createErr || !newUser?.user) {
+          console.error("Failed to create Supabase user:", createErr);
+          return new Response("Failed to create account", { status: 500 });
+        }
+
+        supabaseUserId = newUser.user.id;
+
+        // Create profile_players row
+        await supabaseAdmin.from("profile_players").insert({
+          profile_id: supabaseUserId,
+          player_id: supabaseUserId,
+          puuid,
+          nametag,
+          region,
+        });
       }
     }
 
-    console.log(`Riot RSO linked: ${nametag} (${region}) → user ${userId}`);
+    // Generate a magic link / session for the user
+    // Use signInWithPassword with the known email + a temp OTP approach
+    // Actually: use admin.generateLink to create a magic link
+    const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+      type: "magiclink",
+      email: riotEmail,
+    });
+
+    if (linkErr || !linkData) {
+      console.error("Failed to generate magic link:", linkErr);
+      return new Response("Failed to create session", { status: 500 });
+    }
+
+    // Extract the token from the magic link URL
+    const magicUrl = new URL(linkData.properties.action_link);
+    const token = magicUrl.searchParams.get("token") || magicUrl.hash;
+
+    console.log(`Riot RSO login: ${nametag} (${region}) → user ${supabaseUserId}`);
 
     return Response.json({
       success: true,
+      mode: "login",
       nametag,
       region,
       puuid,
       gameName,
       tagLine,
+      // Return the magic link for frontend to verify
+      verifyUrl: linkData.properties.action_link,
+      email: riotEmail,
+      hashed_token: linkData.properties.hashed_token,
     });
 
-  } catch (err) {
-    console.error("Riot auth callback error:", err);
-    return new Response("Internal server error", { status: 500 });
+  } catch (err: any) {
+    console.error("Riot auth callback error:", err?.message ?? err);
+    return new Response(err?.message ?? "Internal server error", { status: 500 });
   }
 }
