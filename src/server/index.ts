@@ -31,6 +31,8 @@ import { getChampionStatsHandler, getAvailablePatchesHandler } from "./routes/ge
 import { analyzePlayerHandler, analyzeStatusHandler } from "./routes/analyzePlayer";
 import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlist";
 import { learnOverviewHandler } from "./routes/learn/overview";
+import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
+import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 
 
 
@@ -351,6 +353,14 @@ if (pathname === "/api/champion/stats" && req.method === "POST") {
 
 if (pathname === "/api/champion/patches" && req.method === "GET") {
   return withLogAndCors(req, pathname, getAvailablePatchesHandler);
+}
+
+if (pathname === "/api/champion/otp-ranking" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getChampionOtpRankingHandler);
+}
+
+if (pathname === "/api/player-ranks" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getPlayerRanksHandler);
 }
 
 if (pathname === "/api/tierlist/snapshot" && req.method === "POST") {

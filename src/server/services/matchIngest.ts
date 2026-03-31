@@ -254,6 +254,9 @@ async function ingestSingleMatch(
       item4: p.item4 ?? 0,
       item5: p.item5 ?? 0,
       item6: p.item6 ?? 0,
+      perk_primary_style: p.perks?.styles?.[0]?.style ?? null,
+      perk_sub_style: p.perks?.styles?.[1]?.style ?? null,
+      perk_keystone: p.perks?.styles?.[0]?.selections?.[0]?.perk ?? null,
     })
   );
 

@@ -60,7 +60,7 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
     const body: ChampionStatsBody | null = raw ? (safeJson(raw) as any) : null;
     const championId = body?.championId;
     const rawPatch = body?.patch ?? null;
-    const patch = rawPatch || (await getLatestPatch());
+    const patch = rawPatch || null; // null = use materialized views (fast path)
     const region = body?.region ?? null;
     const queueId = body?.queueId ?? 420;
     const role = body?.role ?? null;
