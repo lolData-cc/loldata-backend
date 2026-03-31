@@ -181,12 +181,19 @@ export async function riotAuthCallbackHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Generate a magic link / session for the user
-    // Use signInWithPassword with the known email + a temp OTP approach
-    // Actually: use admin.generateLink to create a magic link
+    // Get the actual email for this Supabase user
+    let userEmail = riotEmail;
+    try {
+      const { data: userData } = await supabaseAdmin.auth.admin.getUserById(supabaseUserId);
+      if (userData?.user?.email) {
+        userEmail = userData.user.email;
+      }
+    } catch {}
+
+    // Generate a magic link for the user's actual email
     const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
       type: "magiclink",
-      email: riotEmail,
+      email: userEmail,
     });
 
     if (linkErr || !linkData) {
