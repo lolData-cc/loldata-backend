@@ -33,6 +33,7 @@ import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlis
 import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
+import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
 
 
 
@@ -361,6 +362,14 @@ if (pathname === "/api/champion/otp-ranking" && req.method === "POST") {
 
 if (pathname === "/api/player-ranks" && req.method === "POST") {
   return withLogAndCors(req, pathname, getPlayerRanksHandler);
+}
+
+if (pathname === "/api/auth/riot/url" && req.method === "POST") {
+  return withLogAndCors(req, pathname, riotAuthUrlHandler);
+}
+
+if (pathname === "/api/auth/riot/callback" && req.method === "POST") {
+  return withLogAndCors(req, pathname, riotAuthCallbackHandler);
 }
 
 if (pathname === "/api/tierlist/snapshot" && req.method === "POST") {
