@@ -62,25 +62,19 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
 
   const results = startsWithData ?? []
 
-  // Phase 2: if we have fewer than 5, fill with contains matches
-  if (results.length < 5) {
-    const startNames = new Set(results.map((r: any) => `${r.name}#${r.tag}`))
-
+  // Phase 2: only do contains search if we got 0 prefix results AND query is 4+ chars
+  // The %name% pattern causes a full table scan so we only use it as a last resort
+  if (results.length === 0 && searchName.length >= 4) {
     const { data: containsData } = await supabaseAdmin
       .from("users")
       .select("name, tag, icon_id, rank, region")
       .ilike("name", `%${searchName}%`)
       .order("last_searched_at", { ascending: false })
-      .limit(10)
+      .limit(5)
 
     if (containsData) {
       for (const row of containsData) {
-        if (results.length >= 5) break
-        const key = `${row.name}#${row.tag}`
-        if (!startNames.has(key)) {
-          results.push(row)
-          startNames.add(key)
-        }
+        results.push(row)
       }
     }
   }
