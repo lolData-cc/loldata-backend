@@ -175,8 +175,18 @@ export async function generateSnapshotHandler(req: Request): Promise<Response> {
           // C = confidence parameter (higher = more shrinkage for small samples)
           const C = 200
           const adjWr = (e.wins + C * 0.5) / (e.games + C)
-          // PR multiplier: sub-2% PR gets penalized, above 2% is full score
-          const prMult = pickrate >= 0.02 ? 1.0 : 0.6 + (pickrate / 0.02) * 0.4
+          // PR multiplier: steeper penalty for low pickrate
+          // - Below 1% PR: heavily penalized (down to 0.2x)
+          // - 1-3% PR: moderate scaling (0.5x to 1.0x)
+          // - Above 3% PR: bonus up to 1.3x for very popular picks
+          let prMult: number;
+          if (pickrate < 0.01) {
+            prMult = 0.2 + (pickrate / 0.01) * 0.3; // 0.2 → 0.5
+          } else if (pickrate < 0.03) {
+            prMult = 0.5 + ((pickrate - 0.01) / 0.02) * 0.5; // 0.5 → 1.0
+          } else {
+            prMult = 1.0 + Math.min((pickrate - 0.03) / 0.07, 1.0) * 0.3; // 1.0 → 1.3
+          }
           const tier_score = ((adjWr - 0.5) * 100) * prMult;
           return {
             ...e,
