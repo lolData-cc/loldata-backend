@@ -60,15 +60,10 @@ export async function generateSnapshotHandler(req: Request): Promise<Response> {
     let rows: { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }[];
 
     if (aggErr || !aggRows) {
-      console.log("RPC not available, using paginated aggregation...");
+      console.log("RPC not available, using direct participants aggregation...");
 
-      // Paginate through mv_champion_role_stats which is already aggregated
-      const { data: mvData, error: mvErr } = await supabaseAdmin
-        .from("mv_champion_role_stats")
-        .select("*");
-
-      if (mvErr || !mvData?.length) {
-        // Last resort: paginated fetch but with smaller scope
+      {
+        // Aggregate directly from participants table (skip stale materialized view)
         rows = [];
         const PAGE_SIZE = 50000;
         let offset = 0;
@@ -109,38 +104,6 @@ export async function generateSnapshotHandler(req: Request): Promise<Response> {
           if (page.length < PAGE_SIZE) break;
           offset += PAGE_SIZE;
           console.log(`  ... processed ${offset} participants`);
-        }
-
-        rows = Array.from(agg.values());
-      } else {
-        // Use materialized view data — already aggregated
-        rows = [];
-        const agg = new Map<string, { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }>();
-
-        for (const r of mvData as any[]) {
-          const role = normalizeRole(r.role);
-          if (!role) continue;
-          const champId = r.champion_id;
-          const champName = r.champion_name ?? "";
-          const games = r.games ?? 0;
-          const wins = r.wins ?? 0;
-
-          // ALL region
-          const gKey = `ALL:${champId}:${role}`;
-          let ge = agg.get(gKey);
-          if (!ge) { ge = { champion_id: champId, champion_name: champName, role, region: "ALL", games: 0, wins: 0 }; agg.set(gKey, ge); }
-          ge.games += games;
-          ge.wins += wins;
-
-          // Per-region if available
-          const region = r.region ?? "ALL";
-          if (["EUW", "NA", "KR"].includes(region)) {
-            const rKey = `${region}:${champId}:${role}`;
-            let re = agg.get(rKey);
-            if (!re) { re = { champion_id: champId, champion_name: champName, role, region, games: 0, wins: 0 }; agg.set(rKey, re); }
-            re.games += games;
-            re.wins += wins;
-          }
         }
 
         rows = Array.from(agg.values());
