@@ -49,81 +49,132 @@ function assignTier(rank: number, total: number): string {
 export async function generateSnapshotHandler(req: Request): Promise<Response> {
   try {
     const patch = await getLatestPatch();
-    const patchPrefix = patch + ".";
     const today = new Date().toISOString().split("T")[0];
 
     console.log(`📊 Generating tier list snapshot for patch ${patch}, date ${today}`);
 
-    // Paginate to get ALL solo queue match IDs
-    // Include all matches (many have null game_version from cron ingestion)
-    const allMatchIds: string[] = [];
-    let from = 0;
-    const PAGE_SIZE = 1000;
-    while (true) {
-      const { data: page, error: pgErr } = await supabaseAdmin
-        .from("matches")
-        .select("match_id")
-        .eq("queue_id", 420)
-        .range(from, from + PAGE_SIZE - 1);
-      if (pgErr || !page?.length) break;
-      allMatchIds.push(...page.map((m) => m.match_id));
-      if (page.length < PAGE_SIZE) break;
-      from += PAGE_SIZE;
-    }
+    // Use DB-side aggregation instead of fetching all rows into memory
+    const { data: aggRows, error: aggErr } = await supabaseAdmin.rpc("aggregate_tierlist_data");
 
-    console.log(`📦 Found ${allMatchIds.length} total solo queue matches`);
-    if (allMatchIds.length === 0) {
-      return Response.json({ error: "No solo queue matches found" }, { status: 404 });
-    }
+    // If the RPC doesn't exist, fall back to a raw query approach
+    let rows: { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }[];
 
-    // Batch-fetch participants
-    const BATCH = 200;
-    const allParts: { match_id: string; champion_id: number; champion_name: string; role: string; win: boolean }[] = [];
-    for (let i = 0; i < allMatchIds.length; i += BATCH) {
-      const batch = allMatchIds.slice(i, i + BATCH);
-      const { data: parts, error: pErr } = await supabaseAdmin
-        .from("participants")
-        .select("match_id, champion_id, champion_name, role, win")
-        .in("match_id", batch);
-      if (pErr) { console.error(`❌ Participants batch ${i} error:`, pErr.message); continue; }
-      if (parts) allParts.push(...(parts as any));
-    }
-    console.log(`👥 Found ${allParts.length} participants`);
+    if (aggErr || !aggRows) {
+      console.log("RPC not available, using paginated aggregation...");
 
-    // Build match→region map
-    const matchRegionMap = new Map<string, string>();
-    for (const id of allMatchIds) {
-      matchRegionMap.set(id, matchRegion(id));
-    }
+      // Paginate through mv_champion_role_stats which is already aggregated
+      const { data: mvData, error: mvErr } = await supabaseAdmin
+        .from("mv_champion_role_stats")
+        .select("*");
 
-    // Aggregate per (region, champion, role) — both per-region AND global "ALL"
-    type AggKey = string;
-    type AggVal = { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number };
-    const agg = new Map<AggKey, AggVal>();
+      if (mvErr || !mvData?.length) {
+        // Last resort: paginated fetch but with smaller scope
+        rows = [];
+        const PAGE_SIZE = 50000;
+        let offset = 0;
+        const agg = new Map<string, { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }>();
 
-    for (const p of allParts) {
-      const role = normalizeRole(p.role);
-      if (!role) continue;
-      const mr = matchRegionMap.get(p.match_id) ?? "OTHER";
+        while (true) {
+          const { data: page, error: pgErr } = await supabaseAdmin
+            .from("participants")
+            .select("match_id, champion_id, champion_name, role, win")
+            .not("role", "is", null)
+            .not("role", "eq", "")
+            .range(offset, offset + PAGE_SIZE - 1);
 
-      // Per-region entry
-      if (PLATFORM_TO_REGION[mr.toLowerCase()] || mr === "EUW" || mr === "NA" || mr === "KR") {
-        const key = `${mr}:${p.champion_id}:${role}`;
-        let e = agg.get(key);
-        if (!e) { e = { champion_id: p.champion_id, champion_name: p.champion_name, role, region: mr, games: 0, wins: 0 }; agg.set(key, e); }
-        e.games++;
-        if (p.win) e.wins++;
+          if (pgErr || !page?.length) break;
+
+          for (const p of page) {
+            const role = normalizeRole(p.role);
+            if (!role) continue;
+            const mr = matchRegion(p.match_id);
+
+            // Per-region
+            if (["EUW", "NA", "KR"].includes(mr)) {
+              const key = `${mr}:${p.champion_id}:${role}`;
+              let e = agg.get(key);
+              if (!e) { e = { champion_id: p.champion_id, champion_name: p.champion_name, role, region: mr, games: 0, wins: 0 }; agg.set(key, e); }
+              e.games++;
+              if (p.win) e.wins++;
+            }
+
+            // Global
+            const gKey = `ALL:${p.champion_id}:${role}`;
+            let ge = agg.get(gKey);
+            if (!ge) { ge = { champion_id: p.champion_id, champion_name: p.champion_name, role, region: "ALL", games: 0, wins: 0 }; agg.set(gKey, ge); }
+            ge.games++;
+            if (p.win) ge.wins++;
+          }
+
+          if (page.length < PAGE_SIZE) break;
+          offset += PAGE_SIZE;
+          console.log(`  ... processed ${offset} participants`);
+        }
+
+        rows = Array.from(agg.values());
+      } else {
+        // Use materialized view data — already aggregated
+        rows = [];
+        const agg = new Map<string, { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }>();
+
+        for (const r of mvData as any[]) {
+          const role = normalizeRole(r.role);
+          if (!role) continue;
+          const champId = r.champion_id;
+          const champName = r.champion_name ?? "";
+          const games = r.games ?? 0;
+          const wins = r.wins ?? 0;
+
+          // ALL region
+          const gKey = `ALL:${champId}:${role}`;
+          let ge = agg.get(gKey);
+          if (!ge) { ge = { champion_id: champId, champion_name: champName, role, region: "ALL", games: 0, wins: 0 }; agg.set(gKey, ge); }
+          ge.games += games;
+          ge.wins += wins;
+
+          // Per-region if available
+          const region = r.region ?? "ALL";
+          if (["EUW", "NA", "KR"].includes(region)) {
+            const rKey = `${region}:${champId}:${role}`;
+            let re = agg.get(rKey);
+            if (!re) { re = { champion_id: champId, champion_name: champName, role, region, games: 0, wins: 0 }; agg.set(rKey, re); }
+            re.games += games;
+            re.wins += wins;
+          }
+        }
+
+        rows = Array.from(agg.values());
       }
-
-      // Global "ALL" entry
-      const gKey = `ALL:${p.champion_id}:${role}`;
-      let ge = agg.get(gKey);
-      if (!ge) { ge = { champion_id: p.champion_id, champion_name: p.champion_name, role, region: "ALL", games: 0, wins: 0 }; agg.set(gKey, ge); }
-      ge.games++;
-      if (p.win) ge.wins++;
+    } else {
+      rows = aggRows as any[];
     }
 
-    const rows = Array.from(agg.values());
+    console.log(`📦 Aggregated ${rows.length} champion-role entries`);
+
+    // Fill in missing champion names from Data Dragon
+    const missingNames = rows.some(r => !r.champion_name);
+    if (missingNames) {
+      console.log("⚠️ Some champion names are empty, fetching from Data Dragon...");
+      try {
+        const ddragonRes = await fetch("https://ddragon.leagueoflegends.com/api/versions.json");
+        const versions = await ddragonRes.json() as string[];
+        const latestPatch = versions[0];
+        const champRes = await fetch(`https://ddragon.leagueoflegends.com/cdn/${latestPatch}/data/en_US/champion.json`);
+        const champData = await champRes.json() as { data: Record<string, { key: string; id: string }> };
+        const idMap = new Map<number, string>();
+        for (const c of Object.values(champData.data)) {
+          idMap.set(Number(c.key), c.id);
+        }
+        for (const r of rows) {
+          if (!r.champion_name && idMap.has(r.champion_id)) {
+            r.champion_name = idMap.get(r.champion_id)!;
+          }
+        }
+        console.log(`✅ Filled champion names from Data Dragon (patch ${latestPatch})`);
+      } catch (e) {
+        console.error("Failed to fetch champion names from Data Dragon:", e);
+      }
+    }
 
     // Group by region+role, compute totals, tier scores, tiers
     const upsertRows: any[] = [];
