@@ -77,7 +77,15 @@ export async function generateSnapshotHandler(req: Request): Promise<Response> {
             .not("role", "eq", "")
             .range(offset, offset + PAGE_SIZE - 1);
 
-          if (pgErr || !page?.length) break;
+          if (pgErr) {
+            console.error("❌ Participants query error:", pgErr.message);
+            break;
+          }
+          if (!page?.length) {
+            console.log(`  No more rows at offset ${offset}`);
+            break;
+          }
+          console.log(`  Fetched ${page.length} rows at offset ${offset}`);
 
           for (const p of page) {
             const role = normalizeRole(p.role);
