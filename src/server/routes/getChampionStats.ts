@@ -87,14 +87,17 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
     const t0 = Date.now();
 
     // Fast path: serve from daily snapshot when no opponents/region/patch filters
-    if (!opponents && !region && !patch && roleNorm) {
+    if (!opponents && !region && !patch) {
       let snapQuery = supabaseAdmin
         .from("champion_stats_snapshots")
         .select("data")
         .eq("champion_id", champNum)
-        .eq("role", roleNorm)
         .order("snapshot_date", { ascending: false })
         .limit(1);
+
+      if (roleNorm) {
+        snapQuery = snapQuery.eq("role", roleNorm);
+      }
 
       if (tier) {
         snapQuery = snapQuery.eq("tier", tier);
