@@ -86,19 +86,26 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
     }
     const t0 = Date.now();
 
-    // Fast path: serve from daily snapshot when no opponents/tier/region/patch filters
-    if (!opponents && !tier && !region && !patch && roleNorm) {
-      const { data: snap } = await supabaseAdmin
+    // Fast path: serve from daily snapshot when no opponents/region/patch filters
+    if (!opponents && !region && !patch && roleNorm) {
+      let snapQuery = supabaseAdmin
         .from("champion_stats_snapshots")
         .select("data")
         .eq("champion_id", champNum)
         .eq("role", roleNorm)
         .order("snapshot_date", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .limit(1);
+
+      if (tier) {
+        snapQuery = snapQuery.eq("tier", tier);
+      } else {
+        snapQuery = snapQuery.is("tier", null);
+      }
+
+      const { data: snap } = await snapQuery.maybeSingle();
       if (snap?.data) {
         const ms = Date.now() - t0;
-        console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm });
+        console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm, tier: tier ?? "ALL" });
         cacheSet(cacheKey, snap.data);
         return Response.json(snap.data, {
           headers: {
