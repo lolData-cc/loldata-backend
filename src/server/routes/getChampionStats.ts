@@ -138,7 +138,31 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Slow path: compute live from get_champion_stats_full (supports tier + opponents)
+    // Fast path for single opponent: use champion_vs_stats (uses mv_lane_opponents, ~50-200ms)
+    if (opponents?.length === 1 && roleNorm) {
+      const oppId = opponents[0].championId;
+      console.log(`⚡ Fast VS query: ${champNum} vs ${oppId}, role=${roleNorm}, tier=${tier}`);
+      const { data: vsData, error: vsErr } = await supabaseAdmin.rpc("champion_vs_stats", {
+        p_champion_id: champNum,
+        p_opponent_id: oppId,
+        p_role: roleNorm,
+        p_tier: tier ?? null,
+      });
+      if (!vsErr && vsData) {
+        const ms = Date.now() - t0;
+        console.log(`✅ VS stats in ${ms}ms`);
+        cacheSet(cacheKey, vsData);
+        return Response.json(vsData, {
+          headers: {
+            "x-cache": "VS_FAST",
+            "x-request-id": requestId,
+            "server-timing": `db;dur=${ms}`,
+          },
+        });
+      }
+    }
+
+    // Slow path: compute live from get_champion_stats_full (fallback)
     console.log(`⏳ Live query for champion ${champNum}, role=${roleNorm}, tier=${tier}, opponents=${JSON.stringify(opponents)}`);
     const { data, error } = await supabaseAdmin.rpc("get_champion_stats_full", {
       p_champion_id: champNum,
