@@ -12,12 +12,13 @@ type ItemRow = {
 export async function getChampionItemsHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json().catch(() => ({}))
-    const { championName, championId, role, tier, maxPerSlot = 12 } = body as {
+    const { championName, championId, role, tier, maxPerSlot = 12, buildOrder: wantBuildOrder } = body as {
       championName?: string
       championId?: number
       role?: string
       tier?: string
       maxPerSlot?: number
+      buildOrder?: boolean
     }
 
     if (!championName && !championId) {
@@ -59,6 +60,29 @@ export async function getChampionItemsHandler(req: Request): Promise<Response> {
           championName: championName ?? String(championId),
           slots,
           source: "snapshot",
+        })
+      }
+    }
+
+    // Build order query (per-slot item winrates from timeline data)
+    if (wantBuildOrder && championId) {
+      const roleNorm = role === "SUPPORT" ? "UTILITY" : role
+      const { data: boData, error: boErr } = await supabaseAdmin.rpc(
+        "champion_build_order",
+        {
+          p_champion_id: championId,
+          p_role: roleNorm ?? null,
+          p_tier: tier ?? null,
+          p_slot: null,
+          p_limit: 8,
+        }
+      )
+
+      if (!boErr && boData?.length) {
+        return Response.json({
+          championName: championName ?? String(championId),
+          buildOrder: boData,
+          source: "build_order_rpc",
         })
       }
     }
