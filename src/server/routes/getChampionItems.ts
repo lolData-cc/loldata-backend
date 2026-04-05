@@ -12,13 +12,14 @@ type ItemRow = {
 export async function getChampionItemsHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json().catch(() => ({}))
-    const { championName, championId, role, tier, maxPerSlot = 12, buildOrder: wantBuildOrder } = body as {
+    const { championName, championId, role, tier, maxPerSlot = 12, buildOrder: wantBuildOrder, opponentId } = body as {
       championName?: string
       championId?: number
       role?: string
       tier?: string
       maxPerSlot?: number
       buildOrder?: boolean
+      opponentId?: number
     }
 
     if (!championName && !championId) {
@@ -60,6 +61,28 @@ export async function getChampionItemsHandler(req: Request): Promise<Response> {
           championName: championName ?? String(championId),
           slots,
           source: "snapshot",
+        })
+      }
+    }
+
+    // VS matchup-specific items (fast, uses mv_lane_opponents)
+    if (wantBuildOrder && championId && opponentId) {
+      const roleNorm = role === "SUPPORT" ? "UTILITY" : role
+      const { data: vsData, error: vsErr } = await supabaseAdmin.rpc(
+        "champion_items_by_slot_vs",
+        {
+          p_champion_id: championId,
+          p_opponent_id: opponentId,
+          p_role: roleNorm ?? null,
+          p_tier: tier ?? null,
+          p_max_per_slot: maxPerSlot,
+        }
+      )
+      if (!vsErr && vsData?.length) {
+        return Response.json({
+          championName: championName ?? String(championId),
+          buildOrder: vsData,
+          source: "vs_items",
         })
       }
     }
