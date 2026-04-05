@@ -25,6 +25,8 @@ import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getLiveStreamersHandler } from "./twitch";
 import { getLeaderboardHandler } from "./routes/leaderboard";
 import { getChampionItemsHandler } from "./routes/getChampionItems";
+import { getChampionRunesHandler } from "./routes/getChampionRunes";
+import { getChampionSoulsHandler } from "./routes/getChampionSouls";
 import { getTotalMasteryHandler } from "./routes/getTotalMastery";
 import { getMasteryListHandler } from "./routes/getMasteryList";
 import { getChampionStatsHandler, getAvailablePatchesHandler } from "./routes/getChampionStats";
@@ -34,6 +36,7 @@ import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
+import { getLivegameStatsHandler } from "./routes/livegameStats";
 
 
 
@@ -276,6 +279,10 @@ if (pathname === "/api/livegame" && req.method === "POST") {
   return withLogAndCors(req, pathname, getLiveGameHandler);
 }
 
+if (pathname === "/api/livegame/stats" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getLivegameStatsHandler);
+}
+
 if (pathname === "/api/aihelp/howtowin" && req.method === "POST") {
   return withLogAndCors(req, pathname, howToWinHandler);
 }
@@ -338,6 +345,14 @@ if (pathname === "/api/billing/create-checkout-session" && req.method === "POST"
 
 if (pathname === "/api/champion/items" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionItemsHandler);
+}
+
+if (pathname === "/api/champion/runes" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getChampionRunesHandler);
+}
+
+if (pathname === "/api/champion/souls" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getChampionSoulsHandler);
 }
 
 if (pathname === "/api/mastery/total" && req.method === "POST") {
