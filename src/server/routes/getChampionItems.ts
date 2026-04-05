@@ -64,25 +64,24 @@ export async function getChampionItemsHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Build order query (per-slot item winrates from timeline data)
+    // Per-slot item winrates (from final inventory, legendary items only)
     if (wantBuildOrder && championId) {
       const roleNorm = role === "SUPPORT" ? "UTILITY" : role
-      const { data: boData, error: boErr } = await supabaseAdmin.rpc(
-        "champion_build_order",
+      const { data: slotData, error: slotErr } = await supabaseAdmin.rpc(
+        "champion_items_by_slot",
         {
           p_champion_id: championId,
           p_role: roleNorm ?? null,
           p_tier: tier ?? null,
-          p_slot: null,
-          p_limit: 8,
+          p_max_per_slot: maxPerSlot,
         }
       )
 
-      if (!boErr && boData?.length) {
+      if (!slotErr && slotData?.length) {
         return Response.json({
           championName: championName ?? String(championId),
-          buildOrder: boData,
-          source: "build_order_rpc",
+          buildOrder: slotData,
+          source: "items_by_slot",
         })
       }
     }
