@@ -138,19 +138,18 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Slow path: compute live from RPC
-    const { data, error } = await supabaseAdmin.rpc("get_champion_stats", {
+    // Slow path: compute live from get_champion_stats_full (supports tier + opponents)
+    console.log(`⏳ Live query for champion ${champNum}, role=${roleNorm}, tier=${tier}, opponents=${JSON.stringify(opponents)}`);
+    const { data, error } = await supabaseAdmin.rpc("get_champion_stats_full", {
       p_champion_id: champNum,
-      p_patch: patch,
-      p_region: region,
-      p_queue_id: queueId ?? 420,
       p_role: roleNorm,
       p_tier: tier,
+      p_queue_id: queueId ?? 420,
       p_opponents: opponents ?? null,
     });
     const ms = Date.now() - t0;
     if (error) {
-      console.error("❌ get_champion_stats rpc error", {
+      console.error("❌ get_champion_stats_full rpc error", {
         requestId,
         message: error.message,
         details: (error as any).details,
@@ -158,9 +157,8 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
         code: (error as any).code,
         ms,
         champNum,
-        patch,
-        queueId,
-        role: roleNorm,
+        roleNorm,
+        tier,
       });
       return new Response("Failed to load champion stats", {
         status: 500,
