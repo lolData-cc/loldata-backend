@@ -87,34 +87,54 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
     const t0 = Date.now();
 
     // Fast path: serve from daily snapshot when no opponents/region/patch filters
-    // Only use snapshots when a specific role is selected (not "all roles")
-    if (!opponents && !region && !patch && roleNorm) {
-      let snapQuery = supabaseAdmin
-        .from("champion_stats_snapshots")
-        .select("data")
-        .eq("champion_id", champNum)
-        .eq("role", roleNorm)
-        .order("snapshot_date", { ascending: false })
-        .limit(1);
-
-      if (tier) {
-        snapQuery = snapQuery.eq("tier", tier);
-      } else {
-        snapQuery = snapQuery.is("tier", null);
+    if (!opponents && !region && !patch) {
+      // If no role specified, find the most popular role from snapshots
+      let effectiveRole = roleNorm;
+      if (!effectiveRole) {
+        const { data: topRole } = await supabaseAdmin
+          .from("champion_stats_snapshots")
+          .select("role, data")
+          .eq("champion_id", champNum)
+          .is("tier", null)
+          .order("snapshot_date", { ascending: false })
+          .limit(10);
+        if (topRole?.length) {
+          // Pick the role with the most games
+          const best = topRole.reduce((a: any, b: any) =>
+            (b.data?.core?.gamesAnalyzed ?? 0) > (a.data?.core?.gamesAnalyzed ?? 0) ? b : a
+          );
+          effectiveRole = best.role;
+        }
       }
 
-      const { data: snap } = await snapQuery.maybeSingle();
-      if (snap?.data) {
-        const ms = Date.now() - t0;
-        console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm, tier: tier ?? "ALL" });
-        cacheSet(cacheKey, snap.data);
-        return Response.json(snap.data, {
-          headers: {
-            "x-cache": "SNAPSHOT",
-            "x-request-id": requestId,
-            "server-timing": `db;dur=${ms}`,
-          },
-        });
+      if (effectiveRole) {
+        let snapQuery = supabaseAdmin
+          .from("champion_stats_snapshots")
+          .select("data")
+          .eq("champion_id", champNum)
+          .eq("role", effectiveRole)
+          .order("snapshot_date", { ascending: false })
+          .limit(1);
+
+        if (tier) {
+          snapQuery = snapQuery.eq("tier", tier);
+        } else {
+          snapQuery = snapQuery.is("tier", null);
+        }
+
+        const { data: snap } = await snapQuery.maybeSingle();
+        if (snap?.data) {
+          const ms = Date.now() - t0;
+          console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm: effectiveRole, tier: tier ?? "ALL" });
+          cacheSet(cacheKey, snap.data);
+          return Response.json(snap.data, {
+            headers: {
+              "x-cache": "SNAPSHOT",
+              "x-request-id": requestId,
+              "server-timing": `db;dur=${ms}`,
+            },
+          });
+        }
       }
     }
 
