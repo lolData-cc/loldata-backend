@@ -1,5 +1,6 @@
 // routes/getChampionItems.ts
 import { supabaseAdmin } from "../supabase/client"
+import { getSnap } from "./getChampionStats"
 
 type ItemRow = {
   item_id: number
@@ -26,24 +27,11 @@ export async function getChampionItemsHandler(req: Request): Promise<Response> {
       return new Response("Missing championName or championId", { status: 400 })
     }
 
-    // Try snapshot first (fast path)
+    // Try preloaded snapshot first (instant)
     if (championId && role) {
-      let snapQuery = supabaseAdmin
-        .from("champion_stats_snapshots")
-        .select("data")
-        .eq("champion_id", championId)
-        .eq("role", role === "SUPPORT" ? "UTILITY" : role)
-        .order("snapshot_date", { ascending: false })
-        .limit(1)
-
-      if (tier) {
-        snapQuery = snapQuery.eq("tier", tier)
-      } else {
-        snapQuery = snapQuery.is("tier", null)
-      }
-
-      const { data: snap } = await snapQuery.maybeSingle()
-      const items = snap?.data?.items as ItemRow[] | undefined
+      const roleNorm = role === "SUPPORT" ? "UTILITY" : role
+      const snapData = getSnap(championId, roleNorm, tier ?? null)
+      const items = snapData?.items as ItemRow[] | undefined
 
       if (items?.length) {
         // Return as flat list in slot "0" — frontend displays as "Most Built"

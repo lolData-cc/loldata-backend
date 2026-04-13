@@ -29,7 +29,7 @@ import { getChampionRunesHandler } from "./routes/getChampionRunes";
 import { getChampionSoulsHandler } from "./routes/getChampionSouls";
 import { getTotalMasteryHandler } from "./routes/getTotalMastery";
 import { getMasteryListHandler } from "./routes/getMasteryList";
-import { getChampionStatsHandler, getAvailablePatchesHandler } from "./routes/getChampionStats";
+import { getChampionStatsHandler, getAvailablePatchesHandler, preloadSnapshots } from "./routes/getChampionStats";
 import { analyzePlayerHandler, analyzeStatusHandler } from "./routes/analyzePlayer";
 import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlist";
 import { learnOverviewHandler } from "./routes/learn/overview";
@@ -85,6 +85,9 @@ function withCors(res: Response): Response {
 
 const PORT = Number(process.env.PORT) || 3001;
 logger.info("SERVER_START", `Server Bun in ascolto sulla porta ${PORT}`);
+
+// Preload champion snapshots into memory for instant responses
+preloadSnapshots();
 
 // 3.a) CREATE CHECKOUT SESSION
 async function createCheckoutSessionHandler(req: Request) {

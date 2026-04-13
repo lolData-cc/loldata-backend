@@ -23,6 +23,70 @@ function cacheGet(key: string) {
 function cacheSet(key: string, value: unknown) {
   _cache.set(key, { exp: Date.now() + CACHE_TTL_MS, value });
 }
+
+// ── Snapshot preload cache ──────────────────────────────────
+// Key: "champId:role:tier" → snapshot data
+const _snapCache = new Map<string, any>();
+let _snapLoaded = false;
+
+function snapKey(champId: number, role: string, tier: string | null) {
+  return `${champId}:${role}:${tier ?? "ALL"}`;
+}
+
+export function getSnap(champId: number, role: string, tier: string | null) {
+  return _snapCache.get(snapKey(champId, role, tier)) ?? null;
+}
+
+function getChampRoles(champId: number): { role: string; games: number }[] {
+  const roles: { role: string; games: number }[] = [];
+  for (const [key, data] of _snapCache.entries()) {
+    if (key.startsWith(`${champId}:`) && key.endsWith(":ALL")) {
+      const role = key.split(":")[1];
+      roles.push({ role, games: data?.core?.gamesAnalyzed ?? 0 });
+    }
+  }
+  return roles.sort((a, b) => b.games - a.games);
+}
+
+export async function preloadSnapshots() {
+  console.log("⏳ Preloading champion snapshots...");
+  const t0 = Date.now();
+
+  // Fetch in pages to avoid timeout
+  const PAGE = 200;
+  let offset = 0;
+  let total = 0;
+  const seen = new Set<string>();
+
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("champion_stats_snapshots")
+      .select("champion_id, role, tier, data, snapshot_date")
+      .order("snapshot_date", { ascending: false })
+      .range(offset, offset + PAGE - 1);
+
+    if (error) {
+      console.error(`❌ Snapshot preload failed at offset ${offset}:`, error.message);
+      break;
+    }
+
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      const k = snapKey(row.champion_id, row.role, row.tier);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      _snapCache.set(k, row.data);
+    }
+
+    total += data.length;
+    offset += PAGE;
+    if (data.length < PAGE) break;
+  }
+
+  _snapLoaded = true;
+  console.log(`✅ Preloaded ${_snapCache.size} snapshots (${total} rows) in ${Date.now() - t0}ms`);
+}
 function safeJson(text: string) {
   try {
     return JSON.parse(text);
@@ -86,48 +150,21 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
     }
     const t0 = Date.now();
 
-    // Fast path: serve from daily snapshot when no opponents/region/patch filters
-    if (!opponents && !region && !patch) {
-      // If no role specified, find the most popular role from snapshots
+    // Fast path: serve from preloaded snapshot cache
+    if (!opponents && !region && !patch && _snapLoaded) {
       let effectiveRole = roleNorm;
       if (!effectiveRole) {
-        const { data: topRole } = await supabaseAdmin
-          .from("champion_stats_snapshots")
-          .select("role, data")
-          .eq("champion_id", champNum)
-          .is("tier", null)
-          .order("snapshot_date", { ascending: false })
-          .limit(10);
-        if (topRole?.length) {
-          // Pick the role with the most games
-          const best = topRole.reduce((a: any, b: any) =>
-            (b.data?.core?.gamesAnalyzed ?? 0) > (a.data?.core?.gamesAnalyzed ?? 0) ? b : a
-          );
-          effectiveRole = best.role;
-        }
+        const roles = getChampRoles(champNum);
+        if (roles.length) effectiveRole = roles[0].role;
       }
 
       if (effectiveRole) {
-        let snapQuery = supabaseAdmin
-          .from("champion_stats_snapshots")
-          .select("data")
-          .eq("champion_id", champNum)
-          .eq("role", effectiveRole)
-          .order("snapshot_date", { ascending: false })
-          .limit(1);
-
-        if (tier) {
-          snapQuery = snapQuery.eq("tier", tier);
-        } else {
-          snapQuery = snapQuery.is("tier", null);
-        }
-
-        const { data: snap } = await snapQuery.maybeSingle();
-        if (snap?.data) {
+        const snapData = getSnap(champNum, effectiveRole, tier ?? null);
+        if (snapData) {
           const ms = Date.now() - t0;
           console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm: effectiveRole, tier: tier ?? "ALL" });
-          cacheSet(cacheKey, snap.data);
-          return Response.json(snap.data, {
+          cacheSet(cacheKey, snapData);
+          return Response.json(snapData, {
             headers: {
               "x-cache": "SNAPSHOT",
               "x-request-id": requestId,

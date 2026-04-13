@@ -1,5 +1,6 @@
 // routes/getChampionRunes.ts — Rune winrates per champion/role/opponent
 import { supabaseAdmin } from "../supabase/client";
+import { getSnap } from "./getChampionStats";
 
 export async function getChampionRunesHandler(req: Request): Promise<Response> {
   try {
@@ -16,6 +17,18 @@ export async function getChampionRunesHandler(req: Request): Promise<Response> {
       return new Response("Missing championId", { status: 400 });
     }
 
+    // Fast path: serve from preloaded snapshot
+    if (!opponentId && role) {
+      const snapData = getSnap(championId, role.toUpperCase(), tier ?? null);
+      if (snapData?.runes) {
+        return Response.json({
+          championId, role, tier, opponentId: null,
+          runes: snapData.runes.slice(0, limit),
+        });
+      }
+    }
+
+    // Fallback: live RPC
     const { data, error } = await supabaseAdmin.rpc("champion_rune_stats", {
       p_champion_id: championId,
       p_role: role ?? null,
