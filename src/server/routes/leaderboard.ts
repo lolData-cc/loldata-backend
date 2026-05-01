@@ -222,10 +222,28 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
       }
     }
 
-    const entriesWithChamps = enriched.map((e: any) => ({
-      ...e,
-      topChampions: e.puuid ? (topChampsMap[e.puuid] ?? null) : null,
-    }));
+    // Fetch pro players and streamers in bulk
+    const nametags = enriched.map((e: any) => e.nametag).filter(Boolean);
+    const proSet = new Set<string>();
+    const streamerSet = new Set<string>();
+    if (nametags.length > 0) {
+      const [{ data: pros }, { data: streamers }] = await Promise.all([
+        supabaseAdmin.from("pro_players").select("username, team"),
+        supabaseAdmin.from("streamers").select("username"),
+      ]);
+      if (pros) for (const p of pros) proSet.add(p.username?.toLowerCase());
+      if (streamers) for (const s of streamers) streamerSet.add(s.username?.toLowerCase());
+    }
+
+    const entriesWithChamps = enriched.map((e: any) => {
+      const nt = (e.nametag ?? "").toLowerCase();
+      return {
+        ...e,
+        topChampions: e.puuid ? (topChampsMap[e.puuid] ?? null) : null,
+        isPro: proSet.has(nt),
+        isStreamer: streamerSet.has(nt),
+      };
+    });
 
     return Response.json({
       region,
