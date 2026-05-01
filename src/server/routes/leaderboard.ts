@@ -229,10 +229,10 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
     if (nametags.length > 0) {
       const [{ data: pros }, { data: streamers }] = await Promise.all([
         supabaseAdmin.from("pro_players").select("username, team"),
-        supabaseAdmin.from("streamers").select("username"),
+        supabaseAdmin.from("streamers").select("lol_nametag"),
       ]);
       if (pros) for (const p of pros) proSet.add(p.username?.toLowerCase());
-      if (streamers) for (const s of streamers) streamerSet.add(s.username?.toLowerCase());
+      if (streamers) for (const s of streamers) streamerSet.add(s.lol_nametag?.toLowerCase());
     }
 
     const entriesWithChamps = enriched.map((e: any) => {
