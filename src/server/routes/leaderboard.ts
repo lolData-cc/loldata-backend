@@ -7,6 +7,7 @@ import {
   getSummonerByPuuid,
   getAccountByPuuid,
 } from "../riot";
+import { supabaseAdmin } from "../supabase/client";
 
 const LADDER_TTL_MS = 60_000;      // cache lista base (CH+GM+M) 1 min
 const ENRICH_TTL_MS = 3_600_000;   // cache enrichment 1 h
@@ -206,6 +207,26 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
       }
     });
 
+    // Fetch top champions from users table in bulk
+    const puuids = enriched.map((e: any) => e.puuid).filter(Boolean);
+    let topChampsMap: Record<string, any[]> = {};
+    if (puuids.length > 0) {
+      const { data: usersData } = await supabaseAdmin
+        .from("users")
+        .select("puuid, top_champions")
+        .in("puuid", puuids);
+      if (usersData) {
+        for (const u of usersData) {
+          if (u.top_champions) topChampsMap[u.puuid] = u.top_champions;
+        }
+      }
+    }
+
+    const entriesWithChamps = enriched.map((e: any) => ({
+      ...e,
+      topChampions: e.puuid ? (topChampsMap[e.puuid] ?? null) : null,
+    }));
+
     return Response.json({
       region,
       queue,
@@ -213,7 +234,7 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
       pageSize,
       total,
       totalPages,
-      entries: enriched,
+      entries: entriesWithChamps,
       cachedAt: new Date().toISOString(),
       ttlMs: LADDER_TTL_MS,
     });
