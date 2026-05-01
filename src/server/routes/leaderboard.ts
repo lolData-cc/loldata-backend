@@ -100,16 +100,13 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
           tier: e.tier,
         })),
       };
-      // Compute tier cutoffs (minimum LP to be in each tier)
-      const challEntries = payload.rawEntries.filter((e: any) => e.tier === "CHALLENGER" && e.leaguePoints > 0);
-      const gmEntries = payload.rawEntries.filter((e: any) => e.tier === "GRANDMASTER" && e.leaguePoints > 0);
-      const challLPs = challEntries.map((e: any) => e.leaguePoints);
-      const gmLPs = gmEntries.map((e: any) => e.leaguePoints);
+      // Tier cutoffs (fixed by Riot) + player counts
       payload.cutoffs = {
-        challenger: challLPs.length > 0 ? Math.min(...challLPs) : null,
-        grandmaster: gmLPs.length > 0 ? Math.min(...gmLPs) : null,
+        challenger: 800,
+        grandmaster: 400,
         challengerCount: payload.rawEntries.filter((e: any) => e.tier === "CHALLENGER").length,
         grandmasterCount: payload.rawEntries.filter((e: any) => e.tier === "GRANDMASTER").length,
+        masterCount: payload.rawEntries.filter((e: any) => e.tier === "MASTER").length,
       };
 
       ladderCache.set(cacheKey, { ts: now, body: payload });
