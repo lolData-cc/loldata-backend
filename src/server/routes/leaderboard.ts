@@ -100,14 +100,16 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
           tier: e.tier,
         })),
       };
-      // Compute tier cutoffs
-      const challEntries = payload.rawEntries.filter((e: any) => e.tier === "CHALLENGER");
-      const gmEntries = payload.rawEntries.filter((e: any) => e.tier === "GRANDMASTER");
+      // Compute tier cutoffs (minimum LP to be in each tier)
+      const challEntries = payload.rawEntries.filter((e: any) => e.tier === "CHALLENGER" && e.leaguePoints > 0);
+      const gmEntries = payload.rawEntries.filter((e: any) => e.tier === "GRANDMASTER" && e.leaguePoints > 0);
+      const challLPs = challEntries.map((e: any) => e.leaguePoints);
+      const gmLPs = gmEntries.map((e: any) => e.leaguePoints);
       payload.cutoffs = {
-        challenger: challEntries.length > 0 ? Math.min(...challEntries.map((e: any) => e.leaguePoints)) : null,
-        grandmaster: gmEntries.length > 0 ? Math.min(...gmEntries.map((e: any) => e.leaguePoints)) : null,
-        challengerCount: challEntries.length,
-        grandmasterCount: gmEntries.length,
+        challenger: challLPs.length > 0 ? Math.min(...challLPs) : null,
+        grandmaster: gmLPs.length > 0 ? Math.min(...gmLPs) : null,
+        challengerCount: payload.rawEntries.filter((e: any) => e.tier === "CHALLENGER").length,
+        grandmasterCount: payload.rawEntries.filter((e: any) => e.tier === "GRANDMASTER").length,
       };
 
       ladderCache.set(cacheKey, { ts: now, body: payload });
