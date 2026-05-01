@@ -100,6 +100,16 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
           tier: e.tier,
         })),
       };
+      // Compute tier cutoffs
+      const challEntries = payload.rawEntries.filter((e: any) => e.tier === "CHALLENGER");
+      const gmEntries = payload.rawEntries.filter((e: any) => e.tier === "GRANDMASTER");
+      payload.cutoffs = {
+        challenger: challEntries.length > 0 ? Math.min(...challEntries.map((e: any) => e.leaguePoints)) : null,
+        grandmaster: gmEntries.length > 0 ? Math.min(...gmEntries.map((e: any) => e.leaguePoints)) : null,
+        challengerCount: challEntries.length,
+        grandmasterCount: gmEntries.length,
+      };
+
       ladderCache.set(cacheKey, { ts: now, body: payload });
     }
 
@@ -253,6 +263,7 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
       total,
       totalPages,
       entries: entriesWithChamps,
+      cutoffs: payload.cutoffs ?? null,
       cachedAt: new Date().toISOString(),
       ttlMs: LADDER_TTL_MS,
     });
