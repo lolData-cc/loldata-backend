@@ -22,6 +22,8 @@ import { getItemStatsHandler } from "./routes/getItemStats"
 import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
 import { getSeasonStatsHandler } from "./routes/season_stats";
+import { getSplitStatsHandler } from "./routes/split_stats";
+import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler } from "./routes/scout";
 import { getLiveStreamersHandler } from "./twitch";
 import { getLeaderboardHandler } from "./routes/leaderboard";
 import { getChampionItemsHandler } from "./routes/getChampionItems";
@@ -243,7 +245,7 @@ serve({
         status: 204,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+          "Access-Control-Allow-Methods": "POST, GET, PATCH, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization, stripe-signature",
         },
       });
@@ -332,6 +334,54 @@ if (pathname === "/api/champion/matchups" && req.method === "POST") {
 
 if (pathname === "/api/season_stats" && req.method === "POST") {
   return withLogAndCors(req, pathname, getSeasonStatsHandler);
+}
+
+if (pathname === "/api/split_stats" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getSplitStatsHandler);
+}
+
+if (pathname === "/api/scout/lobby" && req.method === "POST") {
+  return withLogAndCors(req, pathname, createScoutLobbyHandler);
+}
+
+if (pathname.startsWith("/api/scout/lobby/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readScoutLobbyHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/lobby/") && req.method === "PATCH") {
+  return withLogAndCors(req, pathname, (r) => updateScoutLobbyHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/feed/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readScoutFeedHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/leaderboard/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readScoutLeaderboardHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/stats/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readScoutStatsHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/champions/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readScoutChampionsHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/habits/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readScoutHabitsHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/trending/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readScoutTrendingHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/refresh/") && req.method === "POST") {
+  return withLogAndCors(req, pathname, (r) => refreshScoutLobbyHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/resolve-puuid/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => resolvePuuidHandler(r, pathname));
 }
 
 if (pathname === "/api/streamers/live" && req.method === "GET") {

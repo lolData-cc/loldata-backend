@@ -7,6 +7,7 @@ import { getMatchDetails, getMatchIdsByPuuidOpts } from "../riot";
 import { getCurrentSeasonWindow } from "../season";
 import { supabaseAdmin } from "../supabase/client";
 import { markIngesting, markDone } from "./ingestionTracker";
+import { snapshotIfTracked } from "./rankSnapshot";
 
 const Q_SOLO = 420;
 const Q_FLEX = 440;
@@ -235,6 +236,7 @@ async function ingestSingleMatch(
       participant_id: idx + 1,
       puuid: p.puuid ?? null,
       summoner_name: p.riotIdGameName ?? p.summonerName ?? null,
+      riot_id_tagline: p.riotIdTagline ?? null,
       team_id: p.teamId ?? null,
       champion_id: p.championId ?? null,
       champion_name: p.championName ?? null,
@@ -371,6 +373,12 @@ async function ingestSingleMatch(
     }
   }
 
+  // Rank snapshot — only for puuids in any scout lobby (gated internally).
+  // Fire-and-forget; the snapshot table is independent from match data.
+  snapshotIfTracked(puuid, region, matchId).catch((e) =>
+    console.warn("snapshot post-ingest error:", e)
+  );
+
   return true;
 }
 
@@ -480,11 +488,20 @@ export async function ingestPlayerMatches(
  */
 const QUICK_BATCH = 10;
 
+export type QuickIngestResult = {
+  riotMatchIdsSeen: number;          // how many recent ids Riot returned
+  topMatchIdsFromRiot: string[];     // first 3 ids (for cross-checking with summoner page)
+  existingInDb: number;               // already-ingested
+  newIngested: number;                // freshly ingested
+  riotError?: string;                 // populated if the Riot fetch itself failed
+};
+
 export async function ingestQuickThenBackground(
   puuid: string,
   region: string
-): Promise<void> {
+): Promise<QuickIngestResult> {
   markIngesting(puuid);
+  const tag = puuid.slice(0, 8);
 
   try {
     const { startTime, endTime } = getCurrentSeasonWindow();
@@ -492,17 +509,39 @@ export async function ingestQuickThenBackground(
     const seasonEnd = endTime ?? null;
 
     // 1. Fetch first page of match IDs from Riot (newest first)
-    const firstPageIds = await getMatchIdsByPuuidOpts(puuid, region, {
-      start: 0,
-      count: QUICK_BATCH,
-      type: "ranked",
-      startTime,
-      endTime,
-    });
+    let firstPageIds: string[] | null = null;
+    try {
+      firstPageIds = await getMatchIdsByPuuidOpts(puuid, region, {
+        start: 0,
+        count: QUICK_BATCH,
+        type: "ranked",
+        startTime,
+        endTime,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`⚡ ${tag}… Riot match-ids fetch FAILED: ${msg}`);
+      markDone(puuid);
+      return {
+        riotMatchIdsSeen: 0,
+        topMatchIdsFromRiot: [],
+        existingInDb: 0,
+        newIngested: 0,
+        riotError: msg,
+      };
+    }
 
     if (!firstPageIds?.length) {
+      console.log(
+        `⚡ ${tag}… Riot returned 0 ranked match ids (window: startTime=${startTime ?? "-"}, endTime=${endTime ?? "-"})`
+      );
       markDone(puuid);
-      return;
+      return {
+        riotMatchIdsSeen: 0,
+        topMatchIdsFromRiot: [],
+        existingInDb: 0,
+        newIngested: 0,
+      };
     }
 
     // 2. Check which of these already exist in DB
@@ -515,12 +554,19 @@ export async function ingestQuickThenBackground(
     const existingIds = new Set((existingRows ?? []).map((r) => r.match_id));
     const newQuickIds = firstPageIds.filter((id) => !existingIds.has(id));
 
+    console.log(
+      `⚡ ${tag}… Riot=${firstPageIds.length} [${firstPageIds.slice(0, 3).join(", ")}${firstPageIds.length > 3 ? ", …" : ""}], alreadyInDb=${existingIds.size}, toIngest=${newQuickIds.length}`
+    );
+
     // 3. Ingest the new ones synchronously
+    let ingested = 0;
     if (newQuickIds.length > 0) {
-      console.log(`⚡ Quick-ingesting ${newQuickIds.length} newest matches for ${puuid}`);
+      console.log(`⚡ Quick-ingesting ${newQuickIds.length} newest matches for ${tag}…`);
       for (const matchId of newQuickIds) {
         try {
-          await ingestSingleMatch(matchId, puuid, region, seasonStart, seasonEnd);
+          const ok = await ingestSingleMatch(matchId, puuid, region, seasonStart, seasonEnd);
+          if (ok) ingested++;
+          else console.log(`⚡ ${tag}… skipped ${matchId} (non-ranked queue)`);
           await delay(50);
         } catch (err) {
           console.error(`❌ Quick ingest error for ${matchId}:`, err);
@@ -535,6 +581,13 @@ export async function ingestQuickThenBackground(
     ingestPlayerMatches(puuid, region).catch((e) =>
       console.error("⚠️ Background match ingestion error:", e)
     );
+
+    return {
+      riotMatchIdsSeen: firstPageIds.length,
+      topMatchIdsFromRiot: firstPageIds.slice(0, 3),
+      existingInDb: existingIds.size,
+      newIngested: ingested,
+    };
   } catch (err) {
     markDone(puuid);
     throw err;

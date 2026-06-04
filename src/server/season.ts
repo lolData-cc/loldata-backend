@@ -24,3 +24,12 @@ export function getCurrentSeasonWindow() {
     endTime: end,
   };
 }
+
+export function getCurrentSplitWindow() {
+  const start = parseEpochEnv("SPLIT_START_EPOCH"); // sec
+  const end = parseEpochEnv("SPLIT_END_EPOCH");     // sec (opzionale)
+  return {
+    startTime: start,
+    endTime: end,
+  };
+}

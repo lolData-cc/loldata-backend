@@ -307,10 +307,11 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     }, { onConflict: 'name,tag' })
     if (error) console.error("❌ Errore salvataggio Supabase:", error.message)
 
-    // Fire ingestion in background — don't block the summoner response.
-    // The frontend polls /api/matches with ingesting flag until matches appear.
+    // Fire ingestion in background for DB population (season stats).
+    // For Master+ EUW, the cron handles this proactively, but this
+    // covers edge cases and non-Master+ players.
     ingestQuickThenBackground(account.puuid, region).catch((e) =>
-      console.error("⚠️ Quick ingestion error:", e)
+      console.error("Background ingestion error:", e)
     );
 
     return Response.json({ summoner, saved: true, cooldownRemaining: COOLDOWN_S })
