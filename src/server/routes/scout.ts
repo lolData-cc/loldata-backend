@@ -17,6 +17,43 @@ const MAX_PLAYERS_PER_LOBBY = 20;
 const MAX_ACCOUNTS_PER_PLAYER = 3;
 const SLUG_LENGTH = 7;
 const OWNER_KEY_LENGTH = 32;
+
+// Per-plan lobby limits — free users 3, premium (a.k.a. PRO) 5, elite 10.
+// Reads `profile_players.plan`: null/"free" → free tier.
+const LOBBY_LIMITS: Record<"free" | "premium" | "elite", number> = {
+  free: 3,
+  premium: 5,
+  elite: 10,
+};
+
+type PlanTier = "free" | "premium" | "elite";
+
+function normalizePlan(planRaw: string | null | undefined): PlanTier {
+  const p = (planRaw ?? "").toLowerCase();
+  if (p === "premium" || p === "elite") return p;
+  return "free";
+}
+
+/** Fetch the lobby quota for a user given their plan. */
+async function getLobbyQuota(userId: string): Promise<{
+  plan: PlanTier;
+  used: number;
+  limit: number;
+}> {
+  const { data: profile } = await supabaseAdmin
+    .from("profile_players")
+    .select("plan")
+    .eq("profile_id", userId)
+    .maybeSingle();
+  const plan = normalizePlan(profile?.plan ?? null);
+
+  const { count } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select("slug", { count: "exact", head: true })
+    .eq("owner_user_id", userId);
+
+  return { plan, used: count ?? 0, limit: LOBBY_LIMITS[plan] };
+}
 const SLUG_ALPHABET =
   "23456789abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/I/l for legibility
 const OWNER_KEY_ALPHABET =
@@ -99,6 +136,27 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
     return Response.json(
       { error: "Login required to create a lobby" },
       { status: 401 }
+    );
+  }
+
+  // ─── Plan quota check ────────────────────────────────────────────────
+  // Free: 3, Premium (PRO): 5, Elite: 10.
+  const quota = await getLobbyQuota(userId);
+  if (quota.used >= quota.limit) {
+    return Response.json(
+      {
+        error: `Lobby limit reached (${quota.used}/${quota.limit} on the ${quota.plan} plan)`,
+        plan: quota.plan,
+        used: quota.used,
+        limit: quota.limit,
+        upgradeHint:
+          quota.plan === "free"
+            ? "Upgrade to PRO for 5 lobbies, or Elite for 10."
+            : quota.plan === "premium"
+              ? "Upgrade to Elite for 10 lobbies."
+              : null,
+      },
+      { status: 403 }
     );
   }
 
@@ -232,6 +290,54 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
   }
 
   return Response.json({ slug, ownerKey }, { status: 201 });
+}
+
+// ─── GET /api/scout/my-lobbies ──────────────────────────────────────────
+// Returns the authenticated user's lobbies + quota. Used by the dashboard
+// to render the SCOUT tab with the create button gated on the limit.
+export async function readMyScoutLobbiesHandler(
+  req: Request
+): Promise<Response> {
+  const userId = await getAuthUserId(req);
+  if (!userId) {
+    return Response.json({ error: "Login required" }, { status: 401 });
+  }
+
+  const quota = await getLobbyQuota(userId);
+
+  // Fetch lobbies + a count of unique players per lobby (for the card preview).
+  const { data: lobbies, error } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select(
+      "slug, name, created_at, last_active_at, last_refresh_at, is_public, scout_lobby_players(id)"
+    )
+    .eq("owner_user_id", userId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("scout my-lobbies read error:", error);
+    return Response.json({ error: "Failed to read lobbies" }, { status: 500 });
+  }
+
+  const items = (lobbies ?? []).map((l: any) => ({
+    slug: l.slug,
+    name: l.name,
+    isPublic: l.is_public,
+    createdAt: l.created_at,
+    lastActiveAt: l.last_active_at,
+    lastRefreshAt: l.last_refresh_at,
+    playerCount: Array.isArray(l.scout_lobby_players)
+      ? l.scout_lobby_players.length
+      : 0,
+  }));
+
+  return Response.json({
+    plan: quota.plan,
+    used: quota.used,
+    limit: quota.limit,
+    canCreate: quota.used < quota.limit,
+    lobbies: items,
+  });
 }
 
 // ─── GET /api/scout/resolve-puuid/:puuid?region=euw ─────────────────────
