@@ -1456,6 +1456,235 @@ function windowStartIso(window: string): string | null {
   return null; // all-time
 }
 
+// ─── GET /api/scout/lp-timeline/:slug?period=day|week|month ─────────────
+// Returns a per-player LP timeline since lobby creation. For each player,
+// computes net LP change per bucket (day / ISO week / month) summed across
+// the player's accounts. Used by the LP chart in the Leaderboard tab.
+type LpTimelineBucket = { bucketStart: string; label: string };
+type LpTimelinePlayer = {
+  playerId: string;
+  displayName: string;
+  color: string | null;
+  iconId: number | null;
+  deltas: number[];        // length === buckets.length, 0 for empty buckets
+  cumulative: number[];    // running sum of deltas
+  netTotal: number;        // sum of deltas
+};
+
+function lpBucketStart(ts: number, period: string): number {
+  const d = new Date(ts);
+  if (period === "month") {
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+  }
+  if (period === "week") {
+    // ISO week: Monday is day 1.
+    const day = d.getUTCDay() || 7;
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() - (day - 1));
+    monday.setUTCHours(0, 0, 0, 0);
+    return monday.getTime();
+  }
+  // day
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+function lpAdvanceBucket(ts: number, period: string): number {
+  const d = new Date(ts);
+  if (period === "month") {
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+  }
+  if (period === "week") {
+    return ts + 7 * 86_400_000;
+  }
+  return ts + 86_400_000;
+}
+
+function lpBucketLabel(ts: number, period: string): string {
+  const d = new Date(ts);
+  if (period === "month") {
+    return d
+      .toLocaleDateString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" })
+      .toUpperCase();
+  }
+  if (period === "week") {
+    // ISO-ish "Wxx" — number of weeks since epoch's Monday isn't useful, use
+    // year-week.
+    const yearStart = Date.UTC(d.getUTCFullYear(), 0, 1);
+    const wk = Math.floor((d.getTime() - yearStart) / (7 * 86_400_000)) + 1;
+    return `W${String(wk).padStart(2, "0")}`;
+  }
+  return d
+    .toLocaleDateString("en-US", { month: "short", day: "2-digit", timeZone: "UTC" })
+    .toUpperCase();
+}
+
+export async function readScoutLpTimelineHandler(
+  req: Request,
+  pathname: string
+): Promise<Response> {
+  const slug = pathname.split("/").pop();
+  if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
+
+  const url = new URL(req.url);
+  const periodRaw = (url.searchParams.get("period") ?? "day").toLowerCase();
+  const period: "day" | "week" | "month" =
+    periodRaw === "week" || periodRaw === "month" ? (periodRaw as any) : "day";
+
+  // 1. Lobby + players + accounts
+  const { data: lobby } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select("created_at")
+    .eq("slug", slug)
+    .maybeSingle();
+  if (!lobby) {
+    return Response.json({ error: "Lobby not found" }, { status: 404 });
+  }
+  const sinceTs = new Date(lobby.created_at).getTime();
+
+  const { data: playerRows } = await supabaseAdmin
+    .from("scout_lobby_players")
+    .select(
+      "id, display_name, color, order_index, scout_lobby_accounts(puuid, is_primary)"
+    )
+    .eq("lobby_slug", slug)
+    .order("order_index", { ascending: true });
+
+  if (!playerRows || playerRows.length === 0) {
+    return Response.json({ buckets: [], players: [], period });
+  }
+
+  // puuid → playerId map + collect all puuids
+  const puuidToPlayer = new Map<string, string>();
+  const primaryPuuidByPlayer = new Map<string, string>();
+  for (const p of playerRows as any[]) {
+    const accounts = p.scout_lobby_accounts ?? [];
+    for (const a of accounts) puuidToPlayer.set(a.puuid, p.id);
+    const primary =
+      accounts.find((a: any) => a.is_primary)?.puuid ?? accounts[0]?.puuid;
+    if (primary) primaryPuuidByPlayer.set(p.id, primary);
+  }
+  const allPuuids = Array.from(puuidToPlayer.keys());
+  if (allPuuids.length === 0) {
+    return Response.json({ buckets: [], players: [], period });
+  }
+
+  // 2. Icon lookup for primary puuid (so chart legends can show avatars).
+  const iconByPuuid = new Map<string, number | null>();
+  {
+    const primaryList = Array.from(primaryPuuidByPlayer.values());
+    if (primaryList.length > 0) {
+      const { data: iconRows } = await supabaseAdmin
+        .from("users")
+        .select("puuid, icon_id")
+        .in("puuid", primaryList);
+      for (const r of iconRows ?? []) iconByPuuid.set(r.puuid, r.icon_id ?? null);
+    }
+  }
+
+  // 3. Pull ALL solo/duo snapshots since one bucket BEFORE the lobby start
+  //    (we need the pre-lobby "baseline" for the first bucket's delta).
+  const fetchSinceIso = new Date(sinceTs - 7 * 86_400_000).toISOString();
+  const { data: snapRows } = await supabaseAdmin
+    .from("scout_rank_snapshots")
+    .select("puuid, tier, rank_division, lp, taken_at")
+    .in("puuid", allPuuids)
+    .eq("queue_type", "RANKED_SOLO_5x5")
+    .gte("taken_at", fetchSinceIso)
+    .order("taken_at", { ascending: true });
+
+  type Snap = { ts: number; score: number };
+  const snapsByPuuid = new Map<string, Snap[]>();
+  for (const s of (snapRows ?? []) as any[]) {
+    const arr = snapsByPuuid.get(s.puuid) ?? [];
+    arr.push({
+      ts: new Date(s.taken_at).getTime(),
+      score: ladderScore(s.tier, s.rank_division ?? null, Number(s.lp ?? 0)),
+    });
+    snapsByPuuid.set(s.puuid, arr);
+  }
+
+  // 4. Generate buckets from lobby creation → today (inclusive).
+  const buckets: LpTimelineBucket[] = [];
+  const startBucketTs = lpBucketStart(sinceTs, period);
+  const todayBucketTs = lpBucketStart(Date.now(), period);
+  let cursor = startBucketTs;
+  while (cursor <= todayBucketTs) {
+    buckets.push({
+      bucketStart: new Date(cursor).toISOString(),
+      label: lpBucketLabel(cursor, period),
+    });
+    cursor = lpAdvanceBucket(cursor, period);
+  }
+
+  // 5. Per-player deltas. For each puuid, compute the delta for each
+  //    bucket = (last score within bucket) - (last score before bucket).
+  //    Then sum across the player's accounts. No snapshot → 0 delta.
+  const players: LpTimelinePlayer[] = (playerRows as any[]).map((p) => {
+    const playerPuuids = (p.scout_lobby_accounts ?? []).map((a: any) => a.puuid);
+    const deltas = new Array(buckets.length).fill(0);
+
+    for (const puuid of playerPuuids) {
+      const snaps = snapsByPuuid.get(puuid) ?? [];
+      if (snaps.length === 0) continue;
+
+      // For each bucket, find the snapshot pair.
+      let snapIdx = 0;
+      // "before" baseline starts as the score at sinceTs:
+      //   - the most recent snapshot at or before sinceTs, or
+      //   - the first snapshot's score if all are after.
+      let baseline: number | null = null;
+      for (const s of snaps) {
+        if (s.ts <= sinceTs) baseline = s.score;
+        else break;
+      }
+      if (baseline === null) baseline = snaps[0].score;
+
+      for (let b = 0; b < buckets.length; b++) {
+        const bucketStart = new Date(buckets[b].bucketStart).getTime();
+        const bucketEnd =
+          b + 1 < buckets.length
+            ? new Date(buckets[b + 1].bucketStart).getTime()
+            : Number.POSITIVE_INFINITY;
+
+        let lastInBucket: number | null = null;
+        while (snapIdx < snaps.length && snaps[snapIdx].ts < bucketEnd) {
+          const s = snaps[snapIdx];
+          if (s.ts >= bucketStart) lastInBucket = s.score;
+          else baseline = s.score; // before-bucket update
+          snapIdx++;
+        }
+
+        if (lastInBucket !== null) {
+          deltas[b] += lastInBucket - baseline;
+          baseline = lastInBucket;
+        }
+      }
+    }
+
+    const cumulative: number[] = [];
+    let run = 0;
+    for (const d of deltas) {
+      run += d;
+      cumulative.push(run);
+    }
+    const netTotal = run;
+    const primaryPuuid = primaryPuuidByPlayer.get(p.id);
+    const iconId = primaryPuuid ? iconByPuuid.get(primaryPuuid) ?? null : null;
+
+    return {
+      playerId: p.id,
+      displayName: p.display_name,
+      color: p.color ?? null,
+      iconId,
+      deltas,
+      cumulative,
+      netTotal,
+    };
+  });
+
+  return Response.json({ period, buckets, players });
+}
+
 export async function readScoutLeaderboardHandler(
   _req: Request,
   pathname: string
