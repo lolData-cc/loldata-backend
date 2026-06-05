@@ -2163,6 +2163,49 @@ export async function readScoutFeedHandler(
   return Response.json({ items, nextCursor });
 }
 
+// ─── DELETE /api/scout/lobby/:slug ──────────────────────────────────────
+// Delete a lobby (and CASCADE drops players + accounts). Auth: must be the
+// owner (login match on owner_user_id) OR provide ?key=<ownerKey>.
+// Rank snapshots are intentionally kept — they're keyed on puuid only and
+// remain useful for any future lobby tracking the same accounts.
+export async function deleteScoutLobbyHandler(
+  req: Request,
+  pathname: string
+): Promise<Response> {
+  const slug = pathname.split("/").pop();
+  if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
+
+  const url = new URL(req.url);
+  const providedKey = url.searchParams.get("key");
+
+  const { data: lobby, error: lobbyErr } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select("slug, owner_key, owner_user_id")
+    .eq("slug", slug)
+    .maybeSingle();
+  if (lobbyErr || !lobby) {
+    return Response.json({ error: "Lobby not found" }, { status: 404 });
+  }
+
+  const userId = await getAuthUserId(req);
+  const isOwnerByUser = !!userId && userId === lobby.owner_user_id;
+  const isOwnerByKey = !!providedKey && providedKey === lobby.owner_key;
+  if (!isOwnerByUser && !isOwnerByKey) {
+    return Response.json({ error: "Not authorized" }, { status: 403 });
+  }
+
+  const { error: delErr } = await supabaseAdmin
+    .from("scout_lobbies")
+    .delete()
+    .eq("slug", slug);
+  if (delErr) {
+    console.error("scout delete error:", delErr);
+    return Response.json({ error: "Failed to delete lobby" }, { status: 500 });
+  }
+
+  return Response.json({ slug, deleted: true });
+}
+
 // ─── PATCH /api/scout/lobby/:slug ───────────────────────────────────────
 // Replace the lobby's player+account list. Auth: must be the owner (login
 // match on owner_user_id) OR provide ?key=<ownerKey> matching the row.

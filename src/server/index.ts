@@ -23,7 +23,7 @@ import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
 import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
-import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler } from "./routes/scout";
+import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler } from "./routes/scout";
 import { getLiveStreamersHandler } from "./twitch";
 import { getLeaderboardHandler } from "./routes/leaderboard";
 import { getChampionItemsHandler } from "./routes/getChampionItems";
@@ -81,7 +81,7 @@ function withCors(res: Response): Response {
   const headers = new Headers(res.headers);
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization, stripe-signature");
-  headers.set("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  headers.set("Access-Control-Allow-Methods", "POST, GET, PATCH, DELETE, OPTIONS");
   return new Response(res.body, { status: res.status, headers });
 }
 
@@ -245,7 +245,7 @@ serve({
         status: 204,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, GET, PATCH, OPTIONS",
+          "Access-Control-Allow-Methods": "POST, GET, PATCH, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization, stripe-signature",
         },
       });
@@ -354,6 +354,10 @@ if (pathname.startsWith("/api/scout/lobby/") && req.method === "GET") {
 
 if (pathname.startsWith("/api/scout/lobby/") && req.method === "PATCH") {
   return withLogAndCors(req, pathname, (r) => updateScoutLobbyHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/lobby/") && req.method === "DELETE") {
+  return withLogAndCors(req, pathname, (r) => deleteScoutLobbyHandler(r, pathname));
 }
 
 if (pathname.startsWith("/api/scout/feed/") && req.method === "GET") {
