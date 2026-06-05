@@ -13,9 +13,14 @@ CREATE TABLE IF NOT EXISTS scout_lobbies (
   owner_user_id    UUID        NULL,           -- supabase auth.users.id of creator
   is_public        BOOLEAN     NOT NULL DEFAULT TRUE,
   password_hash    TEXT        NULL,           -- optional, for private lobbies
+  hero_champion    TEXT        NULL,           -- champion key for hero splash (null = default)
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_active_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Backfill for existing tables (idempotent).
+ALTER TABLE scout_lobbies
+  ADD COLUMN IF NOT EXISTS hero_champion TEXT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_scout_lobbies_owner
   ON scout_lobbies (owner_user_id);

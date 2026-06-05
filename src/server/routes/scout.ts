@@ -7,6 +7,7 @@ import { ingestQuickThenBackground } from "../services/matchIngest";
 import { writeRankSnapshot, ladderScore } from "../services/rankSnapshot";
 import {
   getAccountByPuuid,
+  getLiveGameByPuuid,
   getMatchDetails,
   getMatchIdsByPuuidOpts,
 } from "../riot";
@@ -125,6 +126,7 @@ type CreateLobbyBody = {
   name: string;
   isPublic?: boolean;
   password?: string | null;
+  heroChampion?: string | null;
   players: PlayerInput[];
 };
 
@@ -226,6 +228,7 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
     owner_user_id: userId,
     is_public: body.isPublic !== false,
     password_hash: null, // TODO: add bcrypt if body.password set (phase 5)
+    hero_champion: body.heroChampion?.trim() || null,
   });
 
   if (lobbyErr) {
@@ -337,6 +340,241 @@ export async function readMyScoutLobbiesHandler(
     limit: quota.limit,
     canCreate: quota.used < quota.limit,
     lobbies: items,
+  });
+}
+
+// ─── GET /api/scout/live/:slug ──────────────────────────────────────────
+// Returns every lobby player currently in-game (Spectator-v5 lookup per
+// puuid). One LiveSession per player + account that's live. Frontend
+// polls this every ~30s. We cache aggressively per-puuid (10s) so a
+// hammering polling loop doesn't burn Riot quota.
+type LiveParticipantSlim = {
+  puuid: string;
+  championId: number;
+  summonerName: string | null;
+  teamId: number;
+  isLobbyMember: boolean;
+  lobbyPlayerId: string | null; // populated when isLobbyMember
+  spell1Id: number;             // summoner spell 1 (e.g. flash)
+  spell2Id: number;             // summoner spell 2
+  keystoneId: number | null;    // primary rune keystone
+  primaryStyleId: number | null; // primary rune tree (for tooltip)
+  subStyleId: number | null;     // secondary rune tree
+};
+type LiveSession = {
+  // Identity of which lobby player + account is in game.
+  playerId: string;
+  displayName: string;
+  color: string | null;
+  iconId: number | null;
+  accountPuuid: string;
+  region: string;
+  riotName: string;
+  riotTag: string;
+  // Game info from Spectator API.
+  gameId: number;
+  gameQueueConfigId: number;
+  gameMode: string;
+  gameType: string;
+  gameStartTime: number; // epoch ms (0 = not started yet)
+  gameLength: number;     // seconds
+  mapId: number;
+  // Player's own pick.
+  championId: number;
+  // All 10 (or fewer for ARAM remakes) participants.
+  participants: LiveParticipantSlim[];
+  // Banned champions per team (pickTurn order preserved). Empty for modes
+  // without bans (ARAM, URF, etc).
+  bansBlue: number[];
+  bansRed: number[];
+};
+
+const LIVE_CACHE = new Map<
+  string,
+  { value: any; ts: number }
+>(); // key = puuid
+const LIVE_TTL_MS = 10_000;
+const LIVE_TTL_NEGATIVE_MS = 25_000; // negative cache: don't re-poll "not in game" too aggressively
+
+export async function readScoutLiveHandler(
+  _req: Request,
+  pathname: string
+): Promise<Response> {
+  const slug = pathname.split("/").pop();
+  if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
+
+  // 1. Lobby accounts + player metadata.
+  const { data: playerRows, error: playerErr } = await supabaseAdmin
+    .from("scout_lobby_players")
+    .select(
+      "id, display_name, color, order_index, scout_lobby_accounts(puuid, region, riot_name, riot_tag, is_primary, order_index)"
+    )
+    .eq("lobby_slug", slug)
+    .order("order_index", { ascending: true });
+
+  if (playerErr) {
+    console.error("scout live: lobby read error:", playerErr);
+    return Response.json({ error: "Failed to read lobby" }, { status: 500 });
+  }
+  if (!playerRows || playerRows.length === 0) {
+    return Response.json({ sessions: [], polledAt: Date.now() });
+  }
+
+  // Flat list of (player, account) to poll.
+  type Probe = {
+    playerId: string;
+    displayName: string;
+    color: string | null;
+    primaryPuuid: string;
+    accountPuuid: string;
+    region: string;
+    riotName: string;
+    riotTag: string;
+  };
+  const probes: Probe[] = [];
+  const allLobbyPuuids = new Set<string>();
+  for (const p of playerRows as any[]) {
+    const accounts = (p.scout_lobby_accounts ?? []) as any[];
+    accounts.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+    const primary = accounts.find((a) => a.is_primary) ?? accounts[0];
+    if (!primary) continue;
+    for (const a of accounts) {
+      allLobbyPuuids.add(a.puuid);
+      probes.push({
+        playerId: p.id,
+        displayName: p.display_name,
+        color: p.color ?? null,
+        primaryPuuid: primary.puuid,
+        accountPuuid: a.puuid,
+        region: a.region,
+        riotName: a.riot_name,
+        riotTag: a.riot_tag,
+      });
+    }
+  }
+
+  // Map puuid → owning lobby player id so we can mark participants in the
+  // game that belong to the same lobby (rare but possible squad games).
+  const puuidToLobbyPlayerId = new Map<string, string>();
+  for (const p of probes) {
+    puuidToLobbyPlayerId.set(p.accountPuuid, p.playerId);
+  }
+
+  // 2. Poll Spectator API per puuid (parallel). Cached for LIVE_TTL_MS.
+  async function fetchLive(puuid: string, region: string): Promise<any> {
+    const cached = LIVE_CACHE.get(puuid);
+    if (cached) {
+      const age = Date.now() - cached.ts;
+      const isNeg = cached.value === null;
+      if ((isNeg && age < LIVE_TTL_NEGATIVE_MS) || (!isNeg && age < LIVE_TTL_MS)) {
+        return cached.value;
+      }
+    }
+    try {
+      const data = await getLiveGameByPuuid(puuid, region);
+      LIVE_CACHE.set(puuid, { value: data, ts: Date.now() });
+      return data;
+    } catch (e) {
+      console.error(
+        `scout live: Spectator fetch failed for ${puuid.slice(0, 8)}…:`,
+        (e as any)?.message ?? e
+      );
+      return null;
+    }
+  }
+
+  const probeResults = await Promise.all(
+    probes.map((p) =>
+      fetchLive(p.accountPuuid, p.region).then((game) => ({ probe: p, game }))
+    )
+  );
+
+  // 3. Avatar lookups for lobby players (use primary puuid).
+  const iconByPuuid = new Map<string, number | null>();
+  {
+    const primaries = Array.from(new Set(probes.map((p) => p.primaryPuuid)));
+    if (primaries.length > 0) {
+      const { data: iconRows } = await supabaseAdmin
+        .from("users")
+        .select("puuid, icon_id")
+        .in("puuid", primaries);
+      for (const r of iconRows ?? []) iconByPuuid.set(r.puuid, r.icon_id ?? null);
+    }
+  }
+
+  // 4. Build LiveSession[] — one entry per (player, account) currently in
+  //    a game. Dedupe by gameId+playerId so a squad game isn't reported
+  //    five times.
+  const sessions: LiveSession[] = [];
+  const seen = new Set<string>(); // gameId:playerId
+  for (const { probe, game } of probeResults) {
+    if (!game || typeof game.gameId !== "number") continue;
+    const dedupeKey = `${game.gameId}:${probe.playerId}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    const participants: LiveParticipantSlim[] = (game.participants ?? []).map(
+      (p: any) => ({
+        puuid: p.puuid,
+        championId: p.championId,
+        summonerName: p.riotId
+          ? String(p.riotId).split("#")[0]
+          : p.summonerName ?? null,
+        teamId: p.teamId,
+        isLobbyMember: allLobbyPuuids.has(p.puuid),
+        lobbyPlayerId: puuidToLobbyPlayerId.get(p.puuid) ?? null,
+        spell1Id: Number(p.spell1Id ?? 0),
+        spell2Id: Number(p.spell2Id ?? 0),
+        keystoneId: p.perks?.perkIds?.[0] ?? null,
+        primaryStyleId: p.perks?.perkStyle ?? null,
+        subStyleId: p.perks?.perkSubStyle ?? null,
+      })
+    );
+
+    const me = participants.find((p) => p.puuid === probe.accountPuuid);
+
+    // Bans — split by teamId, preserve pickTurn order.
+    const banned = (game.bannedChampions ?? []) as Array<{
+      championId: number;
+      teamId: number;
+      pickTurn: number;
+    }>;
+    const sortedBans = [...banned].sort(
+      (a, b) => (a.pickTurn ?? 0) - (b.pickTurn ?? 0)
+    );
+    const bansBlue = sortedBans
+      .filter((b) => b.teamId === 100 && b.championId > 0)
+      .map((b) => b.championId);
+    const bansRed = sortedBans
+      .filter((b) => b.teamId === 200 && b.championId > 0)
+      .map((b) => b.championId);
+
+    sessions.push({
+      playerId: probe.playerId,
+      displayName: probe.displayName,
+      color: probe.color,
+      iconId: iconByPuuid.get(probe.primaryPuuid) ?? null,
+      accountPuuid: probe.accountPuuid,
+      region: probe.region,
+      riotName: probe.riotName,
+      riotTag: probe.riotTag,
+      gameId: game.gameId,
+      gameQueueConfigId: game.gameQueueConfigId ?? 0,
+      gameMode: game.gameMode ?? "",
+      gameType: game.gameType ?? "",
+      gameStartTime: game.gameStartTime ?? 0,
+      gameLength: game.gameLength ?? 0,
+      mapId: game.mapId ?? 0,
+      championId: me?.championId ?? 0,
+      participants,
+      bansBlue,
+      bansRed,
+    });
+  }
+
+  return Response.json({
+    sessions,
+    polledAt: Date.now(),
   });
 }
 
@@ -2407,23 +2645,28 @@ export async function readScoutFeedHandler(
       const before = list[afterIdx - 1];
       const after = list[afterIdx];
 
+      // Always compute the LP delta via ladderScore. For same-tier games
+      // this is identical to (after.lp − before.lp). For promo/demote
+      // games it correctly accounts for the division swap (e.g. losing
+      // from EMERALD III 0 LP → EMERALD IV 75 LP is a real −25 LP loss,
+      // not "no change" or "untrackable"), so the session aggregate
+      // doesn't silently drop those games' deltas.
+      const beforeScore = ladderScore(
+        before.tier,
+        before.rank_division,
+        before.lp
+      );
+      const afterScore = ladderScore(
+        after.tier,
+        after.rank_division,
+        after.lp
+      );
+      it.participant.lpDelta = afterScore - beforeScore;
+
       const sameTierDiv =
         before.tier === after.tier &&
         before.rank_division === after.rank_division;
-
-      if (sameTierDiv) {
-        it.participant.lpDelta = after.lp - before.lp;
-      } else {
-        const beforeScore = ladderScore(
-          before.tier,
-          before.rank_division,
-          before.lp
-        );
-        const afterScore = ladderScore(
-          after.tier,
-          after.rank_division,
-          after.lp
-        );
+      if (!sameTierDiv) {
         it.participant.rankChange =
           afterScore > beforeScore ? "PROMOTION" : "DEMOTION";
         it.participant.rankAfter = {
@@ -2568,13 +2811,18 @@ export async function updateScoutLobbyHandler(
     }
   }
 
-  // 3. Update lobby name
+  // 3. Update lobby name. heroChampion is only updated when the client sent
+  //    a non-undefined value, so PATCHing without the field doesn't wipe it.
+  const lobbyUpdate: Record<string, unknown> = {
+    name,
+    is_public: body.isPublic !== false,
+  };
+  if (body.heroChampion !== undefined) {
+    lobbyUpdate.hero_champion = body.heroChampion?.trim() || null;
+  }
   await supabaseAdmin
     .from("scout_lobbies")
-    .update({
-      name,
-      is_public: body.isPublic !== false,
-    })
+    .update(lobbyUpdate)
     .eq("slug", slug);
 
   // 4. Wipe + re-insert players. ON DELETE CASCADE removes their accounts.
@@ -2806,7 +3054,7 @@ export async function readScoutLobbyHandler(
 
   const { data: lobby, error: lobbyErr } = await supabaseAdmin
     .from("scout_lobbies")
-    .select("slug, name, is_public, created_at, last_active_at, last_refresh_at, owner_user_id")
+    .select("slug, name, is_public, created_at, last_active_at, last_refresh_at, owner_user_id, hero_champion")
     .eq("slug", slug)
     .maybeSingle();
 
@@ -2890,6 +3138,7 @@ export async function readScoutLobbyHandler(
     lastActiveAt: lobby.last_active_at,
     lastRefreshAt: lobby.last_refresh_at ?? null,
     ownerUserId: lobby.owner_user_id ?? null,
+    heroChampion: lobby.hero_champion ?? null,
     players: playersWithIcon,
   });
 }
