@@ -1461,24 +1461,38 @@ function windowStartIso(window: string): string | null {
 // computes net LP change per bucket (day / ISO week / month) summed across
 // the player's accounts. Used by the LP chart in the Leaderboard tab.
 type LpTimelineBucket = { bucketStart: string; label: string };
+type LpTimelineAccount = {
+  puuid: string;
+  region: string;
+  riotName: string;
+  riotTag: string;
+  isPrimary: boolean;
+  iconId: number | null;
+  // ladderScore per bucket (forward-filled); null before first snapshot.
+  scores: (number | null)[];
+  finalScore: number | null;
+  finalRank: { tier: string; division: string | null; lp: number } | null;
+};
 type LpTimelinePlayer = {
   playerId: string;
   displayName: string;
   color: string | null;
-  iconId: number | null;
-  // Absolute ladderScore at end-of-bucket. Forward-filled (a bucket with
-  // no snapshot inherits the previous bucket's value). Null for buckets
-  // before the player's first known snapshot. Lets the frontend draw a
-  // line that walks across IRON/BRONZE/.../CHALLENGER divisions.
-  scores: (number | null)[];
-  // Final score at the right edge of the chart, used by chip rendering.
-  finalScore: number | null;
-  // Final tier+division for the chip label (e.g. "EMERALD II 47 LP").
-  finalRank: { tier: string; division: string | null; lp: number } | null;
+  // One entry per linked Riot account. Frontend renders one line per
+  // account when a single player is isolated; otherwise it shows only
+  // the primary account in the multi-player overlay.
+  accounts: LpTimelineAccount[];
 };
 
 function lpBucketStart(ts: number, period: string): number {
   const d = new Date(ts);
+  if (period === "today") {
+    return Date.UTC(
+      d.getUTCFullYear(),
+      d.getUTCMonth(),
+      d.getUTCDate(),
+      d.getUTCHours()
+    );
+  }
   if (period === "month") {
     return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
   }
@@ -1496,6 +1510,7 @@ function lpBucketStart(ts: number, period: string): number {
 
 function lpAdvanceBucket(ts: number, period: string): number {
   const d = new Date(ts);
+  if (period === "today") return ts + 3_600_000;
   if (period === "month") {
     return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
   }
@@ -1507,6 +1522,9 @@ function lpAdvanceBucket(ts: number, period: string): number {
 
 function lpBucketLabel(ts: number, period: string): string {
   const d = new Date(ts);
+  if (period === "today") {
+    return `${String(d.getUTCHours()).padStart(2, "0")}:00`;
+  }
   if (period === "month") {
     return d
       .toLocaleDateString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" })
@@ -1533,8 +1551,12 @@ export async function readScoutLpTimelineHandler(
 
   const url = new URL(req.url);
   const periodRaw = (url.searchParams.get("period") ?? "day").toLowerCase();
-  const period: "day" | "week" | "month" =
-    periodRaw === "week" || periodRaw === "month" ? (periodRaw as any) : "day";
+  const period: "today" | "day" | "week" | "month" =
+    periodRaw === "today" ||
+    periodRaw === "week" ||
+    periodRaw === "month"
+      ? (periodRaw as any)
+      : "day";
 
   // 1. Lobby + players + accounts
   const { data: lobby } = await supabaseAdmin
@@ -1550,7 +1572,7 @@ export async function readScoutLpTimelineHandler(
   const { data: playerRows } = await supabaseAdmin
     .from("scout_lobby_players")
     .select(
-      "id, display_name, color, order_index, scout_lobby_accounts(puuid, is_primary)"
+      "id, display_name, color, order_index, scout_lobby_accounts(puuid, is_primary, region, riot_name, riot_tag, order_index)"
     )
     .eq("lobby_slug", slug)
     .order("order_index", { ascending: true });
@@ -1559,32 +1581,43 @@ export async function readScoutLpTimelineHandler(
     return Response.json({ buckets: [], players: [], period });
   }
 
-  // puuid → playerId map + collect all puuids
-  const puuidToPlayer = new Map<string, string>();
-  const primaryPuuidByPlayer = new Map<string, string>();
+  // Collect every account (preserves region / name / tag for chip labels).
+  type RawAcc = {
+    puuid: string;
+    region: string;
+    riotName: string;
+    riotTag: string;
+    isPrimary: boolean;
+    orderIndex: number;
+  };
+  const accountsByPlayer = new Map<string, RawAcc[]>();
+  const allPuuids: string[] = [];
   for (const p of playerRows as any[]) {
-    const accounts = p.scout_lobby_accounts ?? [];
-    for (const a of accounts) puuidToPlayer.set(a.puuid, p.id);
-    const primary =
-      accounts.find((a: any) => a.is_primary)?.puuid ?? accounts[0]?.puuid;
-    if (primary) primaryPuuidByPlayer.set(p.id, primary);
+    const list: RawAcc[] = ((p.scout_lobby_accounts ?? []) as any[])
+      .map((a) => ({
+        puuid: a.puuid,
+        region: a.region,
+        riotName: a.riot_name,
+        riotTag: a.riot_tag,
+        isPrimary: !!a.is_primary,
+        orderIndex: a.order_index ?? 0,
+      }))
+      .sort((x, y) => x.orderIndex - y.orderIndex);
+    accountsByPlayer.set(p.id, list);
+    for (const a of list) allPuuids.push(a.puuid);
   }
-  const allPuuids = Array.from(puuidToPlayer.keys());
   if (allPuuids.length === 0) {
     return Response.json({ buckets: [], players: [], period });
   }
 
-  // 2. Icon lookup for primary puuid (so chart legends can show avatars).
+  // Icon lookup for every account so chips can show avatars.
   const iconByPuuid = new Map<string, number | null>();
   {
-    const primaryList = Array.from(primaryPuuidByPlayer.values());
-    if (primaryList.length > 0) {
-      const { data: iconRows } = await supabaseAdmin
-        .from("users")
-        .select("puuid, icon_id")
-        .in("puuid", primaryList);
-      for (const r of iconRows ?? []) iconByPuuid.set(r.puuid, r.icon_id ?? null);
-    }
+    const { data: iconRows } = await supabaseAdmin
+      .from("users")
+      .select("puuid, icon_id")
+      .in("puuid", allPuuids);
+    for (const r of iconRows ?? []) iconByPuuid.set(r.puuid, r.icon_id ?? null);
   }
 
   // 3. Pull ALL solo/duo snapshots for the lobby puuids. We want history
@@ -1617,12 +1650,25 @@ export async function readScoutLpTimelineHandler(
     snapsByPuuid.set(s.puuid, arr);
   }
 
-  // 4. Generate buckets from lobby creation → today (inclusive).
+  // 4. Generate buckets.
+  // - today: 00:00 UTC → current hour (clipped to lobby creation if newer)
+  // - day/week/month: lobby creation → today (inclusive)
   const buckets: LpTimelineBucket[] = [];
-  const startBucketTs = lpBucketStart(sinceTs, period);
-  const todayBucketTs = lpBucketStart(Date.now(), period);
+  const now = Date.now();
+  let rangeStartTs = sinceTs;
+  if (period === "today") {
+    const d = new Date(now);
+    const todayMidnight = Date.UTC(
+      d.getUTCFullYear(),
+      d.getUTCMonth(),
+      d.getUTCDate()
+    );
+    rangeStartTs = Math.max(sinceTs, todayMidnight);
+  }
+  const startBucketTs = lpBucketStart(rangeStartTs, period);
+  const endBucketTs = lpBucketStart(now, period);
   let cursor = startBucketTs;
-  while (cursor <= todayBucketTs) {
+  while (cursor <= endBucketTs) {
     buckets.push({
       bucketStart: new Date(cursor).toISOString(),
       label: lpBucketLabel(cursor, period),
@@ -1630,54 +1676,66 @@ export async function readScoutLpTimelineHandler(
     cursor = lpAdvanceBucket(cursor, period);
   }
 
-  // 5. Per-player absolute score per bucket. For multi-account players we
-  //    follow the PRIMARY account — picking the highest across accounts
-  //    would create misleading mid-period jumps when a smurf is played.
-  //    For each bucket: the value is the most recent snapshot whose
-  //    taken_at <= bucketEnd. Buckets before the player's first snapshot
-  //    are null (no rank known yet → frontend can fade the line).
-  const players: LpTimelinePlayer[] = (playerRows as any[]).map((p) => {
-    const accounts = (p.scout_lobby_accounts ?? []) as Array<{
-      puuid: string;
-      is_primary: boolean;
-    }>;
-    const primary =
-      accounts.find((a) => a.is_primary)?.puuid ?? accounts[0]?.puuid ?? null;
-    const snaps = primary ? snapsByPuuid.get(primary) ?? [] : [];
-
+  // Per-bucket end-of-bucket score for ONE puuid. Forward-fills (a bucket
+  // with no snapshot inherits the previous value) and returns the final
+  // snapshot details for chip rendering.
+  function timelineForPuuid(puuid: string): {
+    scores: (number | null)[];
+    finalScore: number | null;
+    finalRank: { tier: string; division: string | null; lp: number } | null;
+  } {
+    const snaps = snapsByPuuid.get(puuid) ?? [];
     const scores: (number | null)[] = new Array(buckets.length).fill(null);
-    let lastSnap: Snap | null = null;
-
-    if (snaps.length > 0) {
-      let snapIdx = 0;
-      for (let b = 0; b < buckets.length; b++) {
-        const bucketEnd =
-          b + 1 < buckets.length
-            ? new Date(buckets[b + 1].bucketStart).getTime()
-            : Number.POSITIVE_INFINITY;
-        while (snapIdx < snaps.length && snaps[snapIdx].ts < bucketEnd) {
-          lastSnap = snaps[snapIdx];
-          snapIdx++;
-        }
-        scores[b] = lastSnap ? lastSnap.score : null;
-      }
+    if (snaps.length === 0) {
+      return { scores, finalScore: null, finalRank: null };
     }
+    let lastSnap: Snap | null = null;
+    let snapIdx = 0;
+    for (let b = 0; b < buckets.length; b++) {
+      const bucketEnd =
+        b + 1 < buckets.length
+          ? new Date(buckets[b + 1].bucketStart).getTime()
+          : Number.POSITIVE_INFINITY;
+      while (snapIdx < snaps.length && snaps[snapIdx].ts < bucketEnd) {
+        lastSnap = snaps[snapIdx];
+        snapIdx++;
+      }
+      scores[b] = lastSnap ? lastSnap.score : null;
+    }
+    return {
+      scores,
+      finalScore: scores.length > 0 ? scores[scores.length - 1] : null,
+      finalRank: lastSnap
+        ? { tier: lastSnap.tier, division: lastSnap.division, lp: lastSnap.lp }
+        : null,
+    };
+  }
 
-    const primaryPuuid = primaryPuuidByPlayer.get(p.id);
-    const iconId = primaryPuuid ? iconByPuuid.get(primaryPuuid) ?? null : null;
-    const finalScore = scores.length > 0 ? scores[scores.length - 1] : null;
-    const finalRank = lastSnap
-      ? { tier: lastSnap.tier, division: lastSnap.division, lp: lastSnap.lp }
-      : null;
+  // 5. Build one player object per lobby player, with one timeline per
+  //    linked account. Frontend renders the primary by default and lets
+  //    the user toggle siblings.
+  const players: LpTimelinePlayer[] = (playerRows as any[]).map((p) => {
+    const rawAccounts = accountsByPlayer.get(p.id) ?? [];
+    const accounts: LpTimelineAccount[] = rawAccounts.map((a) => {
+      const tl = timelineForPuuid(a.puuid);
+      return {
+        puuid: a.puuid,
+        region: a.region,
+        riotName: a.riotName,
+        riotTag: a.riotTag,
+        isPrimary: a.isPrimary,
+        iconId: iconByPuuid.get(a.puuid) ?? null,
+        scores: tl.scores,
+        finalScore: tl.finalScore,
+        finalRank: tl.finalRank,
+      };
+    });
 
     return {
       playerId: p.id,
       displayName: p.display_name,
       color: p.color ?? null,
-      iconId,
-      scores,
-      finalScore,
-      finalRank,
+      accounts,
     };
   });
 
