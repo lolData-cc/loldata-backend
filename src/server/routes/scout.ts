@@ -1466,9 +1466,15 @@ type LpTimelinePlayer = {
   displayName: string;
   color: string | null;
   iconId: number | null;
-  deltas: number[];        // length === buckets.length, 0 for empty buckets
-  cumulative: number[];    // running sum of deltas
-  netTotal: number;        // sum of deltas
+  // Absolute ladderScore at end-of-bucket. Forward-filled (a bucket with
+  // no snapshot inherits the previous bucket's value). Null for buckets
+  // before the player's first known snapshot. Lets the frontend draw a
+  // line that walks across IRON/BRONZE/.../CHALLENGER divisions.
+  scores: (number | null)[];
+  // Final score at the right edge of the chart, used by chip rendering.
+  finalScore: number | null;
+  // Final tier+division for the chip label (e.g. "EMERALD II 47 LP").
+  finalRank: { tier: string; division: string | null; lp: number } | null;
 };
 
 function lpBucketStart(ts: number, period: string): number {
@@ -1581,24 +1587,32 @@ export async function readScoutLpTimelineHandler(
     }
   }
 
-  // 3. Pull ALL solo/duo snapshots since one bucket BEFORE the lobby start
-  //    (we need the pre-lobby "baseline" for the first bucket's delta).
-  const fetchSinceIso = new Date(sinceTs - 7 * 86_400_000).toISOString();
+  // 3. Pull ALL solo/duo snapshots for the lobby puuids. We want history
+  //    from inception (no since-filter) so the chart can show the very
+  //    first snapshot — even if it predates the bucket window.
   const { data: snapRows } = await supabaseAdmin
     .from("scout_rank_snapshots")
     .select("puuid, tier, rank_division, lp, taken_at")
     .in("puuid", allPuuids)
     .eq("queue_type", "RANKED_SOLO_5x5")
-    .gte("taken_at", fetchSinceIso)
     .order("taken_at", { ascending: true });
 
-  type Snap = { ts: number; score: number };
+  type Snap = {
+    ts: number;
+    score: number;
+    tier: string;
+    division: string | null;
+    lp: number;
+  };
   const snapsByPuuid = new Map<string, Snap[]>();
   for (const s of (snapRows ?? []) as any[]) {
     const arr = snapsByPuuid.get(s.puuid) ?? [];
     arr.push({
       ts: new Date(s.taken_at).getTime(),
       score: ladderScore(s.tier, s.rank_division ?? null, Number(s.lp ?? 0)),
+      tier: s.tier,
+      division: s.rank_division ?? null,
+      lp: Number(s.lp ?? 0),
     });
     snapsByPuuid.set(s.puuid, arr);
   }
@@ -1616,69 +1630,54 @@ export async function readScoutLpTimelineHandler(
     cursor = lpAdvanceBucket(cursor, period);
   }
 
-  // 5. Per-player deltas. For each puuid, compute the delta for each
-  //    bucket = (last score within bucket) - (last score before bucket).
-  //    Then sum across the player's accounts. No snapshot → 0 delta.
+  // 5. Per-player absolute score per bucket. For multi-account players we
+  //    follow the PRIMARY account — picking the highest across accounts
+  //    would create misleading mid-period jumps when a smurf is played.
+  //    For each bucket: the value is the most recent snapshot whose
+  //    taken_at <= bucketEnd. Buckets before the player's first snapshot
+  //    are null (no rank known yet → frontend can fade the line).
   const players: LpTimelinePlayer[] = (playerRows as any[]).map((p) => {
-    const playerPuuids = (p.scout_lobby_accounts ?? []).map((a: any) => a.puuid);
-    const deltas = new Array(buckets.length).fill(0);
+    const accounts = (p.scout_lobby_accounts ?? []) as Array<{
+      puuid: string;
+      is_primary: boolean;
+    }>;
+    const primary =
+      accounts.find((a) => a.is_primary)?.puuid ?? accounts[0]?.puuid ?? null;
+    const snaps = primary ? snapsByPuuid.get(primary) ?? [] : [];
 
-    for (const puuid of playerPuuids) {
-      const snaps = snapsByPuuid.get(puuid) ?? [];
-      if (snaps.length === 0) continue;
+    const scores: (number | null)[] = new Array(buckets.length).fill(null);
+    let lastSnap: Snap | null = null;
 
-      // For each bucket, find the snapshot pair.
+    if (snaps.length > 0) {
       let snapIdx = 0;
-      // "before" baseline starts as the score at sinceTs:
-      //   - the most recent snapshot at or before sinceTs, or
-      //   - the first snapshot's score if all are after.
-      let baseline: number | null = null;
-      for (const s of snaps) {
-        if (s.ts <= sinceTs) baseline = s.score;
-        else break;
-      }
-      if (baseline === null) baseline = snaps[0].score;
-
       for (let b = 0; b < buckets.length; b++) {
-        const bucketStart = new Date(buckets[b].bucketStart).getTime();
         const bucketEnd =
           b + 1 < buckets.length
             ? new Date(buckets[b + 1].bucketStart).getTime()
             : Number.POSITIVE_INFINITY;
-
-        let lastInBucket: number | null = null;
         while (snapIdx < snaps.length && snaps[snapIdx].ts < bucketEnd) {
-          const s = snaps[snapIdx];
-          if (s.ts >= bucketStart) lastInBucket = s.score;
-          else baseline = s.score; // before-bucket update
+          lastSnap = snaps[snapIdx];
           snapIdx++;
         }
-
-        if (lastInBucket !== null) {
-          deltas[b] += lastInBucket - baseline;
-          baseline = lastInBucket;
-        }
+        scores[b] = lastSnap ? lastSnap.score : null;
       }
     }
 
-    const cumulative: number[] = [];
-    let run = 0;
-    for (const d of deltas) {
-      run += d;
-      cumulative.push(run);
-    }
-    const netTotal = run;
     const primaryPuuid = primaryPuuidByPlayer.get(p.id);
     const iconId = primaryPuuid ? iconByPuuid.get(primaryPuuid) ?? null : null;
+    const finalScore = scores.length > 0 ? scores[scores.length - 1] : null;
+    const finalRank = lastSnap
+      ? { tier: lastSnap.tier, division: lastSnap.division, lp: lastSnap.lp }
+      : null;
 
     return {
       playerId: p.id,
       displayName: p.display_name,
       color: p.color ?? null,
       iconId,
-      deltas,
-      cumulative,
-      netTotal,
+      scores,
+      finalScore,
+      finalRank,
     };
   });
 
