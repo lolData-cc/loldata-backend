@@ -3193,6 +3193,24 @@ export async function readScoutLobbyHandler(
     .eq("slug", slug)
     .then(() => {});
 
+  // Opportunistic snapshot — every lobby read fires a writeRankSnapshot
+  // per account in the background. writeRankSnapshot dedupes inside
+  // a 5-minute window so this is cheap (= 5 Riot calls only when more
+  // than 5 min has passed since the last snapshot for that puuid).
+  // This guarantees that even if the periodic sweep or post-match hooks
+  // miss an update, just opening the lobby page kicks in fresh data.
+  for (const p of playersWithIcon) {
+    for (const a of p.accounts as Array<{ puuid: string; region: string }>) {
+      invalidatePuuidLobbyCache(a.puuid);
+      writeRankSnapshot(a.puuid, a.region).catch((e) =>
+        console.warn(
+          `scout lobby read: opportunistic snapshot error for ${String(a.puuid).slice(0, 8)}…:`,
+          (e as any)?.message ?? e
+        )
+      );
+    }
+  }
+
   return Response.json({
     slug: lobby.slug,
     name: lobby.name,
