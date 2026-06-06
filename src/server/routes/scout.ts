@@ -4,7 +4,7 @@
 
 import { supabaseAdmin } from "../supabase/client";
 import { ingestQuickThenBackground } from "../services/matchIngest";
-import { writeRankSnapshot, ladderScore } from "../services/rankSnapshot";
+import { writeRankSnapshot, ladderScore, invalidatePuuidLobbyCache } from "../services/rankSnapshot";
 import {
   getAccountByPuuid,
   getLiveGameByPuuid,
@@ -281,8 +281,14 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
   // Fire ingestion + initial rank snapshot for every account in the lobby
   // (fire-and-forget). Ingestion ensures recent matches show up; snapshot
   // establishes the LP-gain baseline for the leaderboards.
+  //
+  // We also invalidate the "is this puuid in any lobby?" cache for each
+  // new puuid — otherwise the next post-match snapshotIfTracked() could
+  // hit a stale `false` entry (from when this puuid wasn't tracked) and
+  // silently skip the snapshot for up to PUUID_LOBBY_TTL.
   for (const p of players) {
     for (const a of p.accounts) {
+      invalidatePuuidLobbyCache(a.puuid);
       ingestQuickThenBackground(a.puuid, a.region).catch((e) =>
         console.error(`scout lobby ingest error for ${a.puuid}:`, e)
       );
@@ -2918,8 +2924,12 @@ export async function updateScoutLobbyHandler(
 
   // 5. Kick ingestion + baseline snapshot for every account (covers any
   //    newly-added accounts; existing ones get fresh data too).
+  //    Invalidate the puuid-in-lobby cache so post-match snapshots for
+  //    fresh puuids start writing immediately instead of waiting out the
+  //    cache TTL.
   for (const p of players) {
     for (const a of p.accounts) {
+      invalidatePuuidLobbyCache(a.puuid);
       ingestQuickThenBackground(a.puuid, a.region).catch((e) =>
         console.error(`scout update ingest error for ${a.puuid}:`, e)
       );
@@ -3019,8 +3029,11 @@ export async function refreshScoutLobbyHandler(
       })
   );
   // Rank snapshots are fast (one Riot call each, no per-match fetches) —
-  // keep them fire-and-forget alongside.
+  // keep them fire-and-forget alongside. We also invalidate the
+  // puuid-in-lobby cache so any concurrent match-ingest snapshot calls
+  // for these puuids see a fresh `true` instead of a stale `false`.
   for (const a of accountList) {
+    invalidatePuuidLobbyCache(a.puuid);
     writeRankSnapshot(a.puuid, a.region).catch((e) =>
       console.error(
         `scout refresh: snapshot error for ${String(a.puuid).slice(0, 8)}…:`,

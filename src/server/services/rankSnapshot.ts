@@ -143,8 +143,25 @@ export async function writeRankSnapshot(
 
 // Is this puuid currently in at least one scout lobby? Cheap lookup used to
 // gate snapshot writes during match ingestion (we only track lobby accounts).
+//
+// Cache TTL was 60s — way too long: when you create a lobby and immediately
+// play a game, the post-match snapshotIfTracked call hits a `false` cache
+// entry (the puuid wasn't in any lobby ~60s ago) and silently skips the
+// write. Dropping to 10s makes the window much narrower, AND we expose
+// `invalidatePuuidLobbyCache` so scout routes can poke holes in the cache
+// when a lobby is created/updated/refreshed.
 const puuidInLobbyCache = new Map<string, { value: boolean; ts: number }>();
-const PUUID_LOBBY_TTL = 60 * 1000; // 60s
+const PUUID_LOBBY_TTL = 10 * 1000; // 10s (was 60s — too stale)
+
+/**
+ * Drop one puuid from the cache (or wipe everything if no puuid passed).
+ * Call this whenever the lobby↔puuid membership changes so the very next
+ * snapshotIfTracked() reflects reality.
+ */
+export function invalidatePuuidLobbyCache(puuid?: string): void {
+  if (puuid) puuidInLobbyCache.delete(puuid);
+  else puuidInLobbyCache.clear();
+}
 
 export async function isPuuidInAnyLobby(puuid: string): Promise<boolean> {
   const cached = puuidInLobbyCache.get(puuid);
@@ -164,16 +181,28 @@ export async function isPuuidInAnyLobby(puuid: string): Promise<boolean> {
 
 /**
  * Convenience: snapshot a puuid only if it's in some lobby. Fire-and-forget.
+ *
+ * Verbose-on-skip: we used to be silent when the puuid wasn't tracked,
+ * which made it impossible to diagnose "LP isn't being tracked" complaints
+ * from the outside. The skip log is one line per skipped puuid + matchId,
+ * which is cheap and easy to grep.
  */
 export async function snapshotIfTracked(
   puuid: string,
   region: string,
   matchId: string | null = null
 ): Promise<void> {
+  const tag = puuid.slice(0, 8);
   try {
-    if (!(await isPuuidInAnyLobby(puuid))) return;
+    const tracked = await isPuuidInAnyLobby(puuid);
+    if (!tracked) {
+      console.log(
+        `📸 snapshotIfTracked ${tag}… match=${matchId ?? "-"} SKIPPED (not in any lobby)`
+      );
+      return;
+    }
     await writeRankSnapshot(puuid, region, matchId);
   } catch (err) {
-    console.warn("snapshotIfTracked error:", err);
+    console.warn(`📸 snapshotIfTracked ${tag}… error:`, err);
   }
 }
