@@ -3255,12 +3255,27 @@ export async function debugScoutSnapshotsHandler(
 
   const lobbyCreatedAt = lobby.created_at;
 
-  const { data: rows } = await supabaseAdmin
-    .from("scout_lobby_accounts")
-    .select("puuid, region, riot_name, riot_tag, is_primary")
+  // scout_lobby_accounts is keyed by player_id, NOT lobby_slug — so we
+  // resolve via the join: lobby_slug → players[].id → accounts[].
+  const { data: playerRows } = await supabaseAdmin
+    .from("scout_lobby_players")
+    .select(
+      "scout_lobby_accounts(puuid, region, riot_name, riot_tag, is_primary)"
+    )
     .eq("lobby_slug", slug);
 
-  const accounts = rows ?? [];
+  const accounts: Array<{ puuid: string; region: string; riot_name: string; riot_tag: string; is_primary: boolean }> = [];
+  for (const pr of (playerRows ?? []) as any[]) {
+    for (const a of (pr.scout_lobby_accounts ?? []) as any[]) {
+      accounts.push({
+        puuid: a.puuid,
+        region: a.region,
+        riot_name: a.riot_name,
+        riot_tag: a.riot_tag,
+        is_primary: a.is_primary,
+      });
+    }
+  }
 
   const out: Array<{
     puuid: string;
