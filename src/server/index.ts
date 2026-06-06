@@ -91,6 +91,11 @@ logger.info("SERVER_START", `Server Bun in ascolto sulla porta ${PORT}`);
 // Preload champion snapshots into memory for instant responses
 preloadSnapshots();
 
+// Start the periodic scout rank-snapshot sweep so LP gets tracked even
+// when nobody is looking at any lobby.
+import { startScoutPeriodicSweep } from "./services/scoutPeriodic";
+startScoutPeriodicSweep();
+
 // 3.a) CREATE CHECKOUT SESSION
 async function createCheckoutSessionHandler(req: Request) {
   try {
