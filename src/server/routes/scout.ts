@@ -3301,6 +3301,47 @@ export async function debugScoutSnapshotsHandler(
       .eq("puuid", a.puuid)
       .gte("taken_at", lobbyCreatedAt);
 
+    // Oldest snapshot in window (solo queue) — drives the baseline
+    // the leaderboard computes balance against.
+    const { data: oldestRows } = await supabaseAdmin
+      .from("scout_rank_snapshots")
+      .select("taken_at, tier, rank_division, lp")
+      .eq("puuid", a.puuid)
+      .eq("queue_type", "RANKED_SOLO_5x5")
+      .gte("taken_at", lobbyCreatedAt)
+      .order("taken_at", { ascending: true })
+      .limit(1);
+    const oldestSolo = oldestRows?.[0] ?? null;
+
+    // Newest snapshot (solo queue) — what the leaderboard compares
+    // against the baseline.
+    const { data: newestRows } = await supabaseAdmin
+      .from("scout_rank_snapshots")
+      .select("taken_at, tier, rank_division, lp")
+      .eq("puuid", a.puuid)
+      .eq("queue_type", "RANKED_SOLO_5x5")
+      .order("taken_at", { ascending: false })
+      .limit(1);
+    const newestSolo = newestRows?.[0] ?? null;
+
+    // Number of DISTINCT (tier, division, lp) tuples in window — if
+    // it's 1, the leaderboard balance will be 0 by definition.
+    const { data: distinctRows } = await supabaseAdmin
+      .from("scout_rank_snapshots")
+      .select("tier, rank_division, lp")
+      .eq("puuid", a.puuid)
+      .eq("queue_type", "RANKED_SOLO_5x5")
+      .gte("taken_at", lobbyCreatedAt);
+    const distinctKeys = new Set(
+      (distinctRows ?? []).map((r: any) => `${r.tier}/${r.rank_division}/${r.lp}`)
+    );
+
+    const balance =
+      oldestSolo && newestSolo
+        ? ladderScore(newestSolo.tier, newestSolo.rank_division, Number(newestSolo.lp ?? 0)) -
+          ladderScore(oldestSolo.tier, oldestSolo.rank_division, Number(oldestSolo.lp ?? 0))
+        : 0;
+
     const { data: latest } = await supabaseAdmin
       .from("scout_rank_snapshots")
       .select("taken_at, tier, rank_division, lp, queue_type")
@@ -3315,8 +3356,12 @@ export async function debugScoutSnapshotsHandler(
       is_in_lobby_cache: inLobby,
       snapshot_count: totalCount ?? 0,
       snapshots_in_window: windowCount ?? 0,
+      solo_baseline: oldestSolo,
+      solo_current: newestSolo,
+      solo_distinct_lp_values_in_window: distinctKeys.size,
+      solo_balance_computed: balance,
       latest_snapshots: (latest ?? []) as any[],
-    });
+    } as any);
   }
 
   return Response.json({
