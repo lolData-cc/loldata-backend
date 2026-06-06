@@ -2149,46 +2149,62 @@ export async function readScoutLeaderboardHandler(
   }
 
   // 4. Snapshot lookups — current rank (latest) + LP delta in window.
+  //
+  // Important: instead of a single .in(puuids).order(taken_at) query,
+  // we fetch the OLDEST and NEWEST snapshot per puuid SEPARATELY with
+  // .limit(1) each. The single query approach silently capped at
+  // Supabase's default 1000-row response limit, which for lobbies with
+  // 10+ accounts × 400+ snapshots each meant `last` was actually the
+  // 1000th-oldest row, not the actual newest. Result: balance was 0
+  // for accounts whose first ~100 snapshots happened to be at the
+  // same LP — which is basically all of them.
   const currentRankByPuuid = new Map<
     string,
     { tier: string; rankDivision: string | null; lp: number; wins: number; losses: number }
   >();
   const balanceByPuuid = new Map<string, number>();
+  const windowByPuuid = new Map<string, { first: any; last: any }>();
 
-  {
-    const { data: latestRows } = await supabaseAdmin
-      .from("scout_rank_snapshots")
-      .select("puuid, tier, rank_division, lp, wins, losses, taken_at")
-      .in("puuid", allPuuids)
-      .eq("queue_type", "RANKED_SOLO_5x5")
-      .order("taken_at", { ascending: false });
-    for (const r of (latestRows ?? []) as any[]) {
-      if (!currentRankByPuuid.has(r.puuid)) {
-        currentRankByPuuid.set(r.puuid, {
-          tier: r.tier,
-          rankDivision: r.rank_division ?? null,
-          lp: Number(r.lp ?? 0),
-          wins: Number(r.wins ?? 0),
-          losses: Number(r.losses ?? 0),
+  await Promise.all(
+    allPuuids.map(async (puuid) => {
+      // Newest snapshot overall (for current rank display + window last).
+      const { data: newestRows } = await supabaseAdmin
+        .from("scout_rank_snapshots")
+        .select("tier, rank_division, lp, wins, losses, taken_at")
+        .eq("puuid", puuid)
+        .eq("queue_type", "RANKED_SOLO_5x5")
+        .order("taken_at", { ascending: false })
+        .limit(1);
+      const newest = newestRows?.[0];
+      if (newest) {
+        currentRankByPuuid.set(puuid, {
+          tier: newest.tier,
+          rankDivision: newest.rank_division ?? null,
+          lp: Number(newest.lp ?? 0),
+          wins: Number(newest.wins ?? 0),
+          losses: Number(newest.losses ?? 0),
         });
       }
-    }
 
-    let lpq = supabaseAdmin
-      .from("scout_rank_snapshots")
-      .select("puuid, lp, tier, rank_division, taken_at")
-      .in("puuid", allPuuids)
-      .eq("queue_type", "RANKED_SOLO_5x5")
-      .order("taken_at", { ascending: true });
-    if (startIso) lpq = lpq.gte("taken_at", startIso);
-    const { data: snapRows } = await lpq;
+      // Oldest snapshot in window — the leaderboard "baseline".
+      let oldestQ = supabaseAdmin
+        .from("scout_rank_snapshots")
+        .select("tier, rank_division, lp, taken_at")
+        .eq("puuid", puuid)
+        .eq("queue_type", "RANKED_SOLO_5x5")
+        .order("taken_at", { ascending: true })
+        .limit(1);
+      if (startIso) oldestQ = oldestQ.gte("taken_at", startIso);
+      const { data: oldestRows } = await oldestQ;
+      const oldest = oldestRows?.[0];
 
-    const windowByPuuid = new Map<string, { first: any; last: any }>();
-    for (const s of (snapRows ?? []) as any[]) {
-      const cur = windowByPuuid.get(s.puuid);
-      if (!cur) windowByPuuid.set(s.puuid, { first: s, last: s });
-      else cur.last = s;
-    }
+      if (oldest && newest) {
+        windowByPuuid.set(puuid, { first: oldest, last: newest });
+      }
+    })
+  );
+
+  {
     for (const [puuid, { first, last }] of windowByPuuid) {
       const firstScore = ladderScore(first.tier, first.rank_division, first.lp ?? 0);
       const lastScore = ladderScore(last.tier, last.rank_division, last.lp ?? 0);
