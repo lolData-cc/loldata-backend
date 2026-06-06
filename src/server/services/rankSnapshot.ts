@@ -23,13 +23,33 @@ const TIER_ORDER = [
 const DIVISION_ORDER: Record<string, number> = { IV: 1, III: 2, II: 3, I: 4 };
 
 /**
- * Composite score for ranking. Sums tier (×1000) + division (×100) + lp.
- * Lets us compute LP gain across tier transitions safely.
- *   IRON IV 0   = 0
- *   GOLD IV 0   = 3000  + 100 = 3100
- *   MASTER 150  = 7000  + 100 + 150 = 7250
- *   CHALLENGER 4000 = 9000 + 100 + 4000 = 13100
+ * Composite score expressed in REAL cumulative LP from IRON IV 0.
+ *
+ * Each tier IRON..DIAMOND has 4 divisions of 100 LP each = 400 LP per tier.
+ * MASTER+ has no divisions — LP is unbounded and continues from where
+ * DIAMOND I 100 ended.
+ *
+ *   IRON IV 0          = 0
+ *   IRON IV 50         = 50
+ *   IRON III 0         = 100
+ *   IRON I 99          = 399
+ *   BRONZE IV 0        = 400         (one tier above IRON I 100)
+ *   PLATINUM I 50      = 4·400 + 3·100 + 50 = 1950
+ *   EMERALD IV 50      = 5·400 + 0·100 + 50 = 2050
+ *     → PLAT I 50 → EME IV 50 delta = 100  ✓
+ *   DIAMOND I 100      = 6·400 + 3·100 + 100 = 2800
+ *   MASTER 0           = 7·400 + 0          = 2800
+ *   MASTER 150         = 7·400 + 150        = 2950
+ *   CHALLENGER 1000    = 7·400 + 1000       = 3800
+ *
+ * Old formula did tier × 1000 + division × 100 + lp, which inflated
+ * every cross-tier delta by 600 LP (since each tier has at most 400
+ * LP of room). That's why Plat I 50 → Emerald IV 50 reported as +700.
  */
+const LP_PER_DIVISION = 100;
+const DIVISIONS_PER_TIER = 4;
+const LP_PER_TIER = LP_PER_DIVISION * DIVISIONS_PER_TIER; // 400
+
 export function ladderScore(
   tier: string | null,
   division: string | null,
@@ -38,8 +58,18 @@ export function ladderScore(
   if (!tier) return 0;
   const t = TIER_ORDER.indexOf(tier.toUpperCase());
   if (t < 0) return 0;
-  const d = division ? DIVISION_ORDER[division.toUpperCase()] ?? 0 : 0;
-  return t * 1000 + d * 100 + lp;
+
+  // MASTER+ has no division; LP is uncapped and continues from where
+  // DIAMOND I 100 leaves off.
+  if (t >= TIER_ORDER.indexOf("MASTER")) {
+    return TIER_ORDER.indexOf("MASTER") * LP_PER_TIER + lp;
+  }
+
+  // IRON..DIAMOND: division IV=1 (lowest) … I=4 (highest, 0-99 LP).
+  // Cumulative offset = (division − 1) × 100, so IV contributes 0 LP,
+  // I contributes 300 LP, with the LP value itself adding 0-99.
+  const dIdx = division ? DIVISION_ORDER[division.toUpperCase()] ?? 1 : 1;
+  return t * LP_PER_TIER + (dIdx - 1) * LP_PER_DIVISION + lp;
 }
 
 // Anti-spam: don't write a new snapshot if the latest existing one for this
