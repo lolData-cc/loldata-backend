@@ -960,7 +960,25 @@ export async function readScoutChampionsHandler(
 
   const url = new URL(req.url);
   const window = url.searchParams.get("window") ?? "all";
-  const startIso = windowStartIso(window);
+  const windowIso = windowStartIso(window);
+
+  // Always clamp to lobby creation so champions counted in the lobby's
+  // history don't include matches that predate the lobby itself.
+  const { data: lobbyMeta } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select("created_at")
+    .eq("slug", slug)
+    .maybeSingle();
+  const lobbyCreatedIso = lobbyMeta?.created_at
+    ? new Date(lobbyMeta.created_at).toISOString()
+    : null;
+  // Use the LATER of the requested window start and the lobby creation.
+  const startIso =
+    windowIso && lobbyCreatedIso
+      ? windowIso > lobbyCreatedIso
+        ? windowIso
+        : lobbyCreatedIso
+      : (windowIso ?? lobbyCreatedIso);
 
   const { ok, playerByPuuid, allPlayers } = await resolveLobbyPuuids(slug);
   if (!ok) return Response.json({ error: "Failed to read lobby" }, { status: 500 });
@@ -1064,6 +1082,7 @@ export async function readScoutChampionsHandler(
 //   - winrate after a win
 //   - longest win streak, longest loss streak
 //   - time-of-day distribution (binned into 4 quarters of the day)
+type TimeBucket = { games: number; wins: number; winrate: number };
 type HabitsPlayer = {
   playerId: string;
   displayName: string;
@@ -1073,10 +1092,19 @@ type HabitsPlayer = {
   afterWin: { games: number; wins: number; winrate: number };
   longestWinStreak: number;
   longestLossStreak: number;
-  timeOfDay: { morning: number; afternoon: number; evening: number; night: number };
+  // Each time bucket now carries games + wins + winrate so the frontend
+  // can render an exact-WR tooltip on hover.
+  timeOfDay: {
+    morning: TimeBucket;
+    afternoon: TimeBucket;
+    evening: TimeBucket;
+    night: TimeBucket;
+  };
 };
 
-function tagTimeOfDay(d: Date): keyof HabitsPlayer["timeOfDay"] {
+function tagTimeOfDay(
+  d: Date
+): "morning" | "afternoon" | "evening" | "night" {
   const h = d.getHours();
   if (h >= 5 && h < 12) return "morning";
   if (h >= 12 && h < 18) return "afternoon";
@@ -1151,11 +1179,14 @@ export async function readScoutHabitsHandler(
       curLossStreak = 0;
     let bestWinStreak = 0,
       bestLossStreak = 0;
-    const tod = { morning: 0, afternoon: 0, evening: 0, night: 0 };
+    const todCounts = { morning: 0, afternoon: 0, evening: 0, night: 0 };
+    const todWins = { morning: 0, afternoon: 0, evening: 0, night: 0 };
 
     for (let i = 0; i < series.length; i++) {
       const g = series[i];
-      tod[tagTimeOfDay(new Date(g.ts))] += 1;
+      const slot = tagTimeOfDay(new Date(g.ts));
+      todCounts[slot] += 1;
+      if (g.win) todWins[slot] += 1;
       if (g.win) {
         curWinStreak += 1;
         curLossStreak = 0;
@@ -1200,11 +1231,24 @@ export async function readScoutHabitsHandler(
       },
       longestWinStreak: bestWinStreak,
       longestLossStreak: bestLossStreak,
-      timeOfDay: tod,
+      timeOfDay: {
+        morning: makeTimeBucket(todCounts.morning, todWins.morning),
+        afternoon: makeTimeBucket(todCounts.afternoon, todWins.afternoon),
+        evening: makeTimeBucket(todCounts.evening, todWins.evening),
+        night: makeTimeBucket(todCounts.night, todWins.night),
+      },
     });
   }
 
   return Response.json({ players: out, window });
+}
+
+function makeTimeBucket(games: number, wins: number): TimeBucket {
+  return {
+    games,
+    wins,
+    winrate: games > 0 ? Math.round((wins / games) * 100) : 0,
+  };
 }
 
 // ─── GET /api/scout/trending/:slug ──────────────────────────────────────
@@ -1598,7 +1642,7 @@ export async function readScoutTrendingHandler(
       };
     })
     .sort((x, y) => y.games - x.games)
-    .slice(0, 20);
+    .slice(0, 10);
 
   // ── Role distribution sorted by games
   const roleDistribution = Array.from(roleAgg.entries())
@@ -2014,6 +2058,9 @@ export async function readScoutLeaderboardHandler(
   }
 
   // Build a flat list of all accounts with their player metadata attached.
+  // Dedup by puuid — if for any reason the lobby has two scout_lobby_accounts
+  // rows pointing to the same puuid (legacy data, double-create races, etc.)
+  // we'd otherwise render two leaderboard rows for the same account.
   type AccountRef = {
     puuid: string;
     region: string;
@@ -2024,8 +2071,11 @@ export async function readScoutLeaderboardHandler(
     color: string | null;
   };
   const accountList: AccountRef[] = [];
+  const seenPuuids = new Set<string>();
   for (const p of players as any[]) {
     for (const a of p.scout_lobby_accounts ?? []) {
+      if (seenPuuids.has(a.puuid)) continue;
+      seenPuuids.add(a.puuid);
       accountList.push({
         puuid: a.puuid,
         region: a.region,
