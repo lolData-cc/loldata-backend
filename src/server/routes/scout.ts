@@ -1911,13 +1911,12 @@ export async function readScoutLpTimelineHandler(
   // 3. Pull ALL solo/duo snapshots for the lobby puuids. We want history
   //    from inception (no since-filter) so the chart can show the very
   //    first snapshot — even if it predates the bucket window.
-  const { data: snapRows } = await supabaseAdmin
-    .from("scout_rank_snapshots")
-    .select("puuid, tier, rank_division, lp, taken_at")
-    .in("puuid", allPuuids)
-    .eq("queue_type", "RANKED_SOLO_5x5")
-    .order("taken_at", { ascending: true });
-
+  //
+  // Same Supabase row-cap pitfall as the leaderboard: a single
+  // .in(puuids).order(taken_at) request silently caps at 1000 rows.
+  // For a lobby that has accumulated thousands of snapshots, the
+  // chart was missing every datapoint past the first ~1000 across
+  // all accounts combined. Fan out per puuid instead.
   type Snap = {
     ts: number;
     score: number;
@@ -1926,16 +1925,29 @@ export async function readScoutLpTimelineHandler(
     lp: number;
   };
   const snapsByPuuid = new Map<string, Snap[]>();
-  for (const s of (snapRows ?? []) as any[]) {
-    const arr = snapsByPuuid.get(s.puuid) ?? [];
-    arr.push({
-      ts: new Date(s.taken_at).getTime(),
-      score: ladderScore(s.tier, s.rank_division ?? null, Number(s.lp ?? 0)),
-      tier: s.tier,
-      division: s.rank_division ?? null,
-      lp: Number(s.lp ?? 0),
-    });
+  const perPuuidTimeline = await Promise.all(
+    allPuuids.map((puuid) =>
+      supabaseAdmin
+        .from("scout_rank_snapshots")
+        .select("puuid, tier, rank_division, lp, taken_at")
+        .eq("puuid", puuid)
+        .eq("queue_type", "RANKED_SOLO_5x5")
+        .order("taken_at", { ascending: true })
+        .limit(50_000)
+    )
+  );
+  for (const { data: snapRows } of perPuuidTimeline) {
+    for (const s of (snapRows ?? []) as any[]) {
+      const arr = snapsByPuuid.get(s.puuid) ?? [];
+      arr.push({
+        ts: new Date(s.taken_at).getTime(),
+        score: ladderScore(s.tier, s.rank_division ?? null, Number(s.lp ?? 0)),
+        tier: s.tier,
+        division: s.rank_division ?? null,
+        lp: Number(s.lp ?? 0),
+      });
     snapsByPuuid.set(s.puuid, arr);
+    }
   }
 
   // 4. Generate buckets.
@@ -2660,15 +2672,14 @@ export async function readScoutFeedHandler(
     }
   }
   if (puuidsNeedingSnap.size > 0) {
-    const { data: snapRows } = await supabaseAdmin
-      .from("scout_rank_snapshots")
-      .select(
-        "puuid, queue_type, tier, rank_division, lp, taken_at, match_id"
-      )
-      .in("puuid", Array.from(puuidsNeedingSnap))
-      .in("queue_type", ["RANKED_SOLO_5x5", "RANKED_FLEX_SR"])
-      .order("taken_at", { ascending: true });
-
+    // Same gotcha as the leaderboard query: a single .in(puuids)
+    // .order(taken_at) request gets silently capped at Supabase's
+    // 1000-row default. For a lobby that has accumulated thousands
+    // of snapshots across all accounts that means everything past
+    // the first day gets dropped, and the per-match lpDelta becomes
+    // null because the post-match snapshot is missing from the list.
+    // Fan out per puuid instead — small N, each query bounded by
+    // that puuid's own snapshot count.
     type Snap = {
       tier: string;
       rank_division: string | null;
@@ -2677,16 +2688,33 @@ export async function readScoutFeedHandler(
       match_id: string | null;
     };
     const snapsByKey = new Map<string, Snap[]>();
-    for (const s of (snapRows ?? []) as any[]) {
-      const key = `${s.puuid}|${s.queue_type}`;
-      if (!snapsByKey.has(key)) snapsByKey.set(key, []);
-      snapsByKey.get(key)!.push({
-        tier: s.tier,
-        rank_division: s.rank_division ?? null,
-        lp: Number(s.lp ?? 0),
-        taken_at: s.taken_at,
-        match_id: s.match_id ?? null,
-      });
+
+    const puuidsArr = Array.from(puuidsNeedingSnap);
+    const perPuuid = await Promise.all(
+      puuidsArr.map((puuid) =>
+        supabaseAdmin
+          .from("scout_rank_snapshots")
+          .select(
+            "puuid, queue_type, tier, rank_division, lp, taken_at, match_id"
+          )
+          .eq("puuid", puuid)
+          .in("queue_type", ["RANKED_SOLO_5x5", "RANKED_FLEX_SR"])
+          .order("taken_at", { ascending: true })
+          .limit(50_000)
+      )
+    );
+    for (const { data: snapRows } of perPuuid) {
+      for (const s of (snapRows ?? []) as any[]) {
+        const key = `${s.puuid}|${s.queue_type}`;
+        if (!snapsByKey.has(key)) snapsByKey.set(key, []);
+        snapsByKey.get(key)!.push({
+          tier: s.tier,
+          rank_division: s.rank_division ?? null,
+          lp: Number(s.lp ?? 0),
+          taken_at: s.taken_at,
+          match_id: s.match_id ?? null,
+        });
+      }
     }
 
     for (const it of items) {
