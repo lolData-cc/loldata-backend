@@ -23,7 +23,7 @@ import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
 import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
-import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler } from "./routes/scout";
+import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler, debugScoutSnapshotsHandler } from "./routes/scout";
 import { getLiveStreamersHandler } from "./twitch";
 import { getLeaderboardHandler } from "./routes/leaderboard";
 import { getChampionItemsHandler } from "./routes/getChampionItems";
@@ -355,6 +355,10 @@ if (pathname === "/api/scout/my-lobbies" && req.method === "GET") {
 
 if (pathname.startsWith("/api/scout/lobby/") && req.method === "GET") {
   return withLogAndCors(req, pathname, (r) => readScoutLobbyHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/snapshots-debug/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => debugScoutSnapshotsHandler(r, pathname));
 }
 
 if (pathname.startsWith("/api/scout/lobby/") && req.method === "PATCH") {

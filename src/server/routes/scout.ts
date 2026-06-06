@@ -4,7 +4,7 @@
 
 import { supabaseAdmin } from "../supabase/client";
 import { ingestQuickThenBackground } from "../services/matchIngest";
-import { writeRankSnapshot, ladderScore, invalidatePuuidLobbyCache } from "../services/rankSnapshot";
+import { writeRankSnapshot, ladderScore, invalidatePuuidLobbyCache, isPuuidInAnyLobby } from "../services/rankSnapshot";
 import {
   getAccountByPuuid,
   getLiveGameByPuuid,
@@ -3221,5 +3221,92 @@ export async function readScoutLobbyHandler(
     ownerUserId: lobby.owner_user_id ?? null,
     heroChampion: lobby.hero_champion ?? null,
     players: playersWithIcon,
+  });
+}
+
+// ─── GET /api/scout/snapshots-debug/:slug ─────────────────────────────
+//
+// Diagnostic endpoint. For every account in a lobby, returns:
+//   - is_in_lobby_cache: what isPuuidInAnyLobby returns RIGHT NOW
+//   - snapshot_count:    total scout_rank_snapshots rows for that puuid
+//   - latest_snapshots:  the most recent 5 snapshots (taken_at, tier, lp)
+//   - lobby_created_at:  the lobby's created_at (acts as leaderboard cutoff)
+//   - snapshots_in_window: how many snapshots ≥ lobby_created_at
+//
+// Use this to confirm whether the LP-tracking path is actually writing
+// rows. If snapshot_count is 1 (or 0) for an account that has played
+// games since lobby creation, something upstream is broken.
+//
+// No auth — read-only diagnostic. Don't expose puuids that aren't
+// already in the lobby payload.
+export async function debugScoutSnapshotsHandler(
+  _req: Request,
+  pathname: string
+): Promise<Response> {
+  const slug = pathname.split("/").pop();
+  if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
+
+  const { data: lobby } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select("created_at")
+    .eq("slug", slug)
+    .maybeSingle();
+  if (!lobby) return Response.json({ error: "Not found" }, { status: 404 });
+
+  const lobbyCreatedAt = lobby.created_at;
+
+  const { data: rows } = await supabaseAdmin
+    .from("scout_lobby_accounts")
+    .select("puuid, region, riot_name, riot_tag, is_primary")
+    .eq("lobby_slug", slug);
+
+  const accounts = rows ?? [];
+
+  const out: Array<{
+    puuid: string;
+    riot_id: string;
+    region: string;
+    is_in_lobby_cache: boolean;
+    snapshot_count: number;
+    snapshots_in_window: number;
+    latest_snapshots: Array<{ taken_at: string; tier: string; rank_division: string | null; lp: number; queue_type: string }>;
+  }> = [];
+
+  for (const a of accounts as Array<{ puuid: string; region: string; riot_name: string; riot_tag: string }>) {
+    const inLobby = await isPuuidInAnyLobby(a.puuid);
+
+    const { count: totalCount } = await supabaseAdmin
+      .from("scout_rank_snapshots")
+      .select("id", { count: "exact", head: true })
+      .eq("puuid", a.puuid);
+
+    const { count: windowCount } = await supabaseAdmin
+      .from("scout_rank_snapshots")
+      .select("id", { count: "exact", head: true })
+      .eq("puuid", a.puuid)
+      .gte("taken_at", lobbyCreatedAt);
+
+    const { data: latest } = await supabaseAdmin
+      .from("scout_rank_snapshots")
+      .select("taken_at, tier, rank_division, lp, queue_type")
+      .eq("puuid", a.puuid)
+      .order("taken_at", { ascending: false })
+      .limit(5);
+
+    out.push({
+      puuid: a.puuid,
+      riot_id: `${a.riot_name}#${a.riot_tag}`,
+      region: a.region,
+      is_in_lobby_cache: inLobby,
+      snapshot_count: totalCount ?? 0,
+      snapshots_in_window: windowCount ?? 0,
+      latest_snapshots: (latest ?? []) as any[],
+    });
+  }
+
+  return Response.json({
+    slug,
+    lobby_created_at: lobbyCreatedAt,
+    accounts: out,
   });
 }

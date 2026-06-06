@@ -81,6 +81,7 @@ export async function writeRankSnapshot(
   }
 
   let written = 0;
+  let dedupedSkips = 0;
   for (const e of entries) {
     const queueType = e?.queueType;
     if (queueType !== QUEUE_SOLO && queueType !== QUEUE_FLEX) continue;
@@ -110,7 +111,26 @@ export async function writeRankSnapshot(
         Number(lastRow.lp ?? 0) === lp;
       const recent =
         Date.now() - new Date(lastRow.taken_at).getTime() < DEDUPE_WINDOW_MS;
-      if (sameRank && recent) continue;
+      if (sameRank && recent) {
+        dedupedSkips++;
+        console.log(
+          `📸 rank snapshot ${tag}… ${queueType} DEDUPED (last=${lastRow.tier} ${lastRow.rank_division} ${lastRow.lp}lp, current=${tier} ${rank} ${lp}lp, age=${Math.round((Date.now() - new Date(lastRow.taken_at).getTime()) / 1000)}s)`
+        );
+        continue;
+      }
+      // Different from last row OR last row is old enough — log the
+      // delta we're about to write, so it's easy to follow LP changes
+      // in the server log.
+      const lastScore = lastRow.tier ? ladderScore(lastRow.tier, lastRow.rank_division, Number(lastRow.lp ?? 0)) : 0;
+      const newScore = ladderScore(tier, rank, lp);
+      const delta = newScore - lastScore;
+      console.log(
+        `📸 rank snapshot ${tag}… ${queueType} CHANGE: ${lastRow.tier} ${lastRow.rank_division} ${lastRow.lp}lp → ${tier} ${rank} ${lp}lp (Δ=${delta >= 0 ? "+" : ""}${delta})`
+      );
+    } else {
+      console.log(
+        `📸 rank snapshot ${tag}… ${queueType} FIRST SNAPSHOT: ${tier} ${rank} ${lp}lp`
+      );
     }
 
     const { error } = await supabaseAdmin.from("scout_rank_snapshots").insert({
@@ -134,11 +154,9 @@ export async function writeRankSnapshot(
     }
   }
 
-  if (written > 0) {
-    console.log(
-      `📸 rank snapshot ${tag}… ${region} wrote ${written} entries`
-    );
-  }
+  console.log(
+    `📸 rank snapshot ${tag}… ${region} done: wrote=${written} deduped=${dedupedSkips}`
+  );
 }
 
 // Is this puuid currently in at least one scout lobby? Cheap lookup used to
