@@ -375,9 +375,34 @@ async function ingestSingleMatch(
 
   // Rank snapshot — only for puuids in any scout lobby (gated internally).
   // Fire-and-forget; the snapshot table is independent from match data.
-  snapshotIfTracked(puuid, region, matchId).catch((e) =>
-    console.warn("snapshot post-ingest error:", e)
-  );
+  //
+  // We DELAY the snapshot by 90s on purpose. Riot's league-v4 endpoint
+  // (the one that reports LP) lags ~30-90s behind match-v5 (which says
+  // "game finished"). Snapshotting immediately captures the pre-match LP
+  // because Riot hasn't applied the post-game delta yet — the resulting
+  // row has identical tier/division/lp to the previous snapshot, the
+  // 5-minute dedupe blocks the write, and the per-match `match_id` link
+  // never gets created. The next periodic sweep at +5m catches the new
+  // LP but without a matchId, so when multiple games are played
+  // back-to-back the feed can no longer attribute per-match deltas.
+  //
+  // We schedule TWO attempts: +90s and +180s. The second attempt is a
+  // safety net for the rare case where Riot's update takes longer than
+  // a minute. writeRankSnapshot's internal dedupe makes the second one
+  // a no-op if the first already wrote (or if neither attempt sees a
+  // change). setTimeout is OK because the server stays up well beyond
+  // three minutes in normal operation; if it restarts in that window
+  // the periodic sweep will still catch up later.
+  setTimeout(() => {
+    snapshotIfTracked(puuid, region, matchId).catch((e) =>
+      console.warn("snapshot post-ingest (T+90s) error:", e)
+    );
+  }, 90_000);
+  setTimeout(() => {
+    snapshotIfTracked(puuid, region, matchId).catch((e) =>
+      console.warn("snapshot post-ingest (T+180s) error:", e)
+    );
+  }, 180_000);
 
   return true;
 }
