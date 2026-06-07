@@ -955,6 +955,10 @@ type ChampionsPlayer = {
   displayName: string;
   color: string | null;
   champions: ChampionLine[];
+  // Per-account champion breakdown, keyed by puuid. Lets the frontend
+  // render an account switcher so the user can flip between e.g. "main"
+  // and "smurf" stats without a separate request.
+  perAccount: Record<string, ChampionLine[]>;
 };
 
 export async function readScoutChampionsHandler(
@@ -1007,12 +1011,31 @@ export async function readScoutChampionsHandler(
     return Response.json({ error: "Failed to read champions" }, { status: 500 });
   }
 
-  // (playerId, champion) → agg
-  const seen = new Set<string>();
-  const agg = new Map<
+  // Two passes through the rows:
+  //   (1) per-player aggregate (the "All accounts" view) — dedupes by
+  //       playerId:matchId so the rare case of a single player having two
+  //       linked accounts in the same match doesn't double-count.
+  //   (2) per-account aggregate (each puuid's own stats) — dedupes by
+  //       puuid:matchId so each account's own history is independent.
+  const seenPlayer = new Set<string>();
+  const aggPlayer = new Map<
     string,
     {
       playerId: string;
+      champion: string;
+      games: number;
+      wins: number;
+      kills: number;
+      deaths: number;
+      assists: number;
+    }
+  >();
+
+  const seenAccount = new Set<string>();
+  const aggAccount = new Map<
+    string,
+    {
+      puuid: string;
       champion: string;
       games: number;
       wins: number;
@@ -1026,58 +1049,117 @@ export async function readScoutChampionsHandler(
     const owner = playerByPuuid.get(r.puuid);
     if (!owner) continue;
     const champ = r.champion_name ?? "Unknown";
-    const seenKey = `${owner.id}:${r.match_id}`;
-    if (seen.has(seenKey)) continue;
-    seen.add(seenKey);
 
-    const key = `${owner.id}::${champ}`;
-    if (!agg.has(key)) {
-      agg.set(key, {
-        playerId: owner.id,
-        champion: champ,
-        games: 0,
-        wins: 0,
-        kills: 0,
-        deaths: 0,
-        assists: 0,
-      });
+    // Player-level aggregate
+    const playerSeenKey = `${owner.id}:${r.match_id}`;
+    if (!seenPlayer.has(playerSeenKey)) {
+      seenPlayer.add(playerSeenKey);
+      const pKey = `${owner.id}::${champ}`;
+      if (!aggPlayer.has(pKey)) {
+        aggPlayer.set(pKey, {
+          playerId: owner.id,
+          champion: champ,
+          games: 0,
+          wins: 0,
+          kills: 0,
+          deaths: 0,
+          assists: 0,
+        });
+      }
+      const a = aggPlayer.get(pKey)!;
+      a.games += 1;
+      if (r.win) a.wins += 1;
+      a.kills += r.kills ?? 0;
+      a.deaths += r.deaths ?? 0;
+      a.assists += r.assists ?? 0;
     }
-    const a = agg.get(key)!;
-    a.games += 1;
-    if (r.win) a.wins += 1;
-    a.kills += r.kills ?? 0;
-    a.deaths += r.deaths ?? 0;
-    a.assists += r.assists ?? 0;
+
+    // Per-account aggregate
+    const accountSeenKey = `${r.puuid}:${r.match_id}`;
+    if (!seenAccount.has(accountSeenKey)) {
+      seenAccount.add(accountSeenKey);
+      const aKey = `${r.puuid}::${champ}`;
+      if (!aggAccount.has(aKey)) {
+        aggAccount.set(aKey, {
+          puuid: r.puuid,
+          champion: champ,
+          games: 0,
+          wins: 0,
+          kills: 0,
+          deaths: 0,
+          assists: 0,
+        });
+      }
+      const a = aggAccount.get(aKey)!;
+      a.games += 1;
+      if (r.win) a.wins += 1;
+      a.kills += r.kills ?? 0;
+      a.deaths += r.deaths ?? 0;
+      a.assists += r.assists ?? 0;
+    }
   }
 
-  const byPlayer = new Map<string, ChampionLine[]>();
-  for (const a of agg.values()) {
+  function toLine(a: {
+    champion: string;
+    games: number;
+    wins: number;
+    kills: number;
+    deaths: number;
+    assists: number;
+  }): ChampionLine {
     const avgKda =
       a.deaths === 0
         ? Math.min(99, a.kills + a.assists)
         : (a.kills + a.assists) / a.deaths;
-    const line: ChampionLine = {
+    return {
       champion: a.champion,
       games: a.games,
       wins: a.wins,
-      winrate: Math.round((a.wins / a.games) * 100),
+      winrate: a.games > 0 ? Math.round((a.wins / a.games) * 100) : 0,
       kills: a.kills,
       deaths: a.deaths,
       assists: a.assists,
       avgKda: Math.round(avgKda * 100) / 100,
     };
-    if (!byPlayer.has(a.playerId)) byPlayer.set(a.playerId, []);
-    byPlayer.get(a.playerId)!.push(line);
   }
 
-  const out: ChampionsPlayer[] = allPlayers.map((p) => ({
-    playerId: p.id,
-    displayName: p.displayName,
-    color: p.color,
-    champions: (byPlayer.get(p.id) ?? [])
-      .sort((x, y) => y.games - x.games || y.winrate - x.winrate)
-      .slice(0, 5),
-  }));
+  const byPlayer = new Map<string, ChampionLine[]>();
+  for (const a of aggPlayer.values()) {
+    if (!byPlayer.has(a.playerId)) byPlayer.set(a.playerId, []);
+    byPlayer.get(a.playerId)!.push(toLine(a));
+  }
+
+  const byAccount = new Map<string, ChampionLine[]>();
+  for (const a of aggAccount.values()) {
+    if (!byAccount.has(a.puuid)) byAccount.set(a.puuid, []);
+    byAccount.get(a.puuid)!.push(toLine(a));
+  }
+
+  // Reverse lookup: playerId → puuids that belong to it (from the lobby
+  // membership map we already built above).
+  const puuidsByPlayerId = new Map<string, string[]>();
+  for (const [puuid, owner] of playerByPuuid.entries()) {
+    if (!puuidsByPlayerId.has(owner.id)) puuidsByPlayerId.set(owner.id, []);
+    puuidsByPlayerId.get(owner.id)!.push(puuid);
+  }
+
+  const out: ChampionsPlayer[] = allPlayers.map((p) => {
+    const perAccount: Record<string, ChampionLine[]> = {};
+    for (const puuid of puuidsByPlayerId.get(p.id) ?? []) {
+      perAccount[puuid] = (byAccount.get(puuid) ?? [])
+        .sort((x, y) => y.games - x.games || y.winrate - x.winrate)
+        .slice(0, 5);
+    }
+    return {
+      playerId: p.id,
+      displayName: p.displayName,
+      color: p.color,
+      champions: (byPlayer.get(p.id) ?? [])
+        .sort((x, y) => y.games - x.games || y.winrate - x.winrate)
+        .slice(0, 5),
+      perAccount,
+    };
+  });
 
   return Response.json({ players: out, window });
 }
