@@ -2043,21 +2043,36 @@ export async function readScoutLpTimelineHandler(
 }
 
 export async function readScoutLeaderboardHandler(
-  _req: Request,
+  req: Request,
   pathname: string
 ): Promise<Response> {
   const slug = pathname.split("/").pop();
   if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
 
-  // Cutoff = lobby creation date. Everything is "since the lobby existed".
+  // Window — `?window=today|week|all`. Defaults to all-time. The three
+  // sidebar widgets (Player of the Day / Week / All time) were all
+  // showing the same numbers because this handler used to ignore the
+  // query string entirely and treated everything as "since lobby
+  // creation". Now we honor the window AND clamp to lobby creation
+  // (you can't have a metric from before the lobby existed).
+  const url = new URL(req.url);
+  const windowParam = url.searchParams.get("window") ?? "all";
+  const windowIso = windowStartIso(windowParam);
+
   const { data: lobbyMeta } = await supabaseAdmin
     .from("scout_lobbies")
     .select("created_at")
     .eq("slug", slug)
     .maybeSingle();
-  const startIso = lobbyMeta?.created_at
+  const lobbyCreatedIso = lobbyMeta?.created_at
     ? new Date(lobbyMeta.created_at).toISOString()
     : null;
+  const startIso =
+    windowIso && lobbyCreatedIso
+      ? windowIso > lobbyCreatedIso
+        ? windowIso
+        : lobbyCreatedIso
+      : (windowIso ?? lobbyCreatedIso);
 
   // 1. Resolve all (player → accounts) — one row per account in the lobby.
   const { data: players, error: playersErr } = await supabaseAdmin
