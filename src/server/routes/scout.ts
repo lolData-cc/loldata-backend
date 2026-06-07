@@ -2007,16 +2007,43 @@ export async function readScoutLpTimelineHandler(
     lp: number;
   };
   const snapsByPuuid = new Map<string, Snap[]>();
-  const perPuuidTimeline = await Promise.all(
-    allPuuids.map((puuid) =>
-      supabaseAdmin
+  // PostgREST caps responses at 1000 rows even when .limit(50000) is set,
+  // which silently drops the latest snapshots for any puuid that has
+  // accumulated more than ~3 days worth of 5-minute periodic samples.
+  // Paginate via .range() chunks until a partial page comes back.
+  async function fetchAllTimelineSnaps(puuid: string) {
+    type Row = {
+      puuid: string;
+      tier: string;
+      rank_division: string | null;
+      lp: number;
+      taken_at: string;
+    };
+    const PAGE = 1000;
+    const MAX_PAGES = 50;
+    const out: Row[] = [];
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const from = page * PAGE;
+      const to = from + PAGE - 1;
+      const { data, error } = await supabaseAdmin
         .from("scout_rank_snapshots")
         .select("puuid, tier, rank_division, lp, taken_at")
         .eq("puuid", puuid)
         .eq("queue_type", "RANKED_SOLO_5x5")
         .order("taken_at", { ascending: true })
-        .limit(50_000)
-    )
+        .range(from, to);
+      if (error) {
+        console.error("lp timeline: snapshot page error:", error.message);
+        break;
+      }
+      const rows = (data ?? []) as Row[];
+      out.push(...rows);
+      if (rows.length < PAGE) break;
+    }
+    return { data: out };
+  }
+  const perPuuidTimeline = await Promise.all(
+    allPuuids.map(fetchAllTimelineSnaps)
   );
   for (const { data: snapRows } of perPuuidTimeline) {
     for (const s of (snapRows ?? []) as any[]) {
@@ -2787,9 +2814,36 @@ export async function readScoutFeedHandler(
     const snapsByKey = new Map<string, Snap[]>();
 
     const puuidsArr = Array.from(puuidsNeedingSnap);
-    const perPuuid = await Promise.all(
-      puuidsArr.map((puuid) =>
-        supabaseAdmin
+    // PostgREST caps every response at 1000 rows regardless of .limit() or
+    // .range() — that's the next gotcha after the per-puuid fan-out one.
+    // For a tracked account that's been in a lobby for more than ~3 days
+    // (1000 / 12 per hour from the 5-minute periodic sweep) only the
+    // OLDEST 1000 snapshots come back when we sort ascending, which is
+    // exactly the slice that doesn't help us compute deltas for recent
+    // matches — the post-match snapshot for today is past row 1000 and
+    // we never see it, so lpDelta stays null and the player wonders why
+    // their wins aren't credited.
+    //
+    // Paginate explicitly with `.range()` chunks of 1000 until a partial
+    // page comes back. 50k cap = ~5 weeks of 5-minute snapshots, which
+    // is plenty for any feed window.
+    async function fetchAllSnaps(puuid: string) {
+      type Row = {
+        puuid: string;
+        queue_type: string;
+        tier: string;
+        rank_division: string | null;
+        lp: number;
+        taken_at: string;
+        match_id: string | null;
+      };
+      const PAGE = 1000;
+      const MAX_PAGES = 50;
+      const out: Row[] = [];
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const from = page * PAGE;
+        const to = from + PAGE - 1;
+        const { data, error } = await supabaseAdmin
           .from("scout_rank_snapshots")
           .select(
             "puuid, queue_type, tier, rank_division, lp, taken_at, match_id"
@@ -2797,9 +2851,18 @@ export async function readScoutFeedHandler(
           .eq("puuid", puuid)
           .in("queue_type", ["RANKED_SOLO_5x5", "RANKED_FLEX_SR"])
           .order("taken_at", { ascending: true })
-          .limit(50_000)
-      )
-    );
+          .range(from, to);
+        if (error) {
+          console.error("scout feed: snapshot page error:", error.message);
+          break;
+        }
+        const rows = (data ?? []) as Row[];
+        out.push(...rows);
+        if (rows.length < PAGE) break;
+      }
+      return { data: out };
+    }
+    const perPuuid = await Promise.all(puuidsArr.map(fetchAllSnaps));
     for (const { data: snapRows } of perPuuid) {
       for (const s of (snapRows ?? []) as any[]) {
         const key = `${s.puuid}|${s.queue_type}`;
