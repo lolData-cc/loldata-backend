@@ -2166,7 +2166,13 @@ export async function readScoutLeaderboardHandler(
   // (you can't have a metric from before the lobby existed).
   const url = new URL(req.url);
   const windowParam = url.searchParams.get("window") ?? "all";
-  const windowIso = windowStartIso(windowParam);
+  // Optional client-provided cutoff. The frontend uses this to pass
+  // LOCAL midnight for the "today" widget, since the default helper
+  // (windowStartIso) anchors on UTC midnight — which puts ~2h of the
+  // previous day into "today" for European users right after midnight.
+  // If `since` is provided, it overrides the default.
+  const sinceParam = url.searchParams.get("since");
+  const windowIso = sinceParam ?? windowStartIso(windowParam);
 
   const { data: lobbyMeta } = await supabaseAdmin
     .from("scout_lobbies")
@@ -3390,6 +3396,44 @@ export async function readScoutLobbyHandler(
     return { ...p, iconId };
   });
 
+  // Attach the current solo-queue rank to every account so the matches tab
+  // can render a "start → current" pill on each group card without making
+  // a second round-trip. Cheap: one limit(1) query per account, fanned
+  // out in parallel.
+  const allAccountPuuids = playersWithIcon.flatMap((p: any) =>
+    p.accounts.map((a: any) => a.puuid as string)
+  );
+  const currentRankByPuuid = new Map<
+    string,
+    { tier: string; rankDivision: string | null; lp: number }
+  >();
+  await Promise.all(
+    allAccountPuuids.map(async (puuid) => {
+      const { data: rows } = await supabaseAdmin
+        .from("scout_rank_snapshots")
+        .select("tier, rank_division, lp")
+        .eq("puuid", puuid)
+        .eq("queue_type", "RANKED_SOLO_5x5")
+        .order("taken_at", { ascending: false })
+        .limit(1);
+      const row = rows?.[0];
+      if (row) {
+        currentRankByPuuid.set(puuid, {
+          tier: row.tier,
+          rankDivision: row.rank_division ?? null,
+          lp: Number(row.lp ?? 0),
+        });
+      }
+    })
+  );
+  const playersWithRank = playersWithIcon.map((p: any) => ({
+    ...p,
+    accounts: p.accounts.map((a: any) => ({
+      ...a,
+      currentRank: currentRankByPuuid.get(a.puuid) ?? null,
+    })),
+  }));
+
   // Bump last_active_at (fire-and-forget)
   supabaseAdmin
     .from("scout_lobbies")
@@ -3424,7 +3468,7 @@ export async function readScoutLobbyHandler(
     lastRefreshAt: lobby.last_refresh_at ?? null,
     ownerUserId: lobby.owner_user_id ?? null,
     heroChampion: lobby.hero_champion ?? null,
-    players: playersWithIcon,
+    players: playersWithRank,
   });
 }
 
