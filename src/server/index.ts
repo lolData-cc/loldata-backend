@@ -113,6 +113,45 @@ async function createCheckoutSessionHandler(req: Request) {
       .single();
 
     let customerId = row?.stripe_customer_id as string | null;
+
+    // Validate that the cached customer still exists in the current
+    // Stripe environment. After a Test → Live switch the DB still
+    // holds test-mode customer IDs that Live mode doesn't know about
+    // ("No such customer: cus_..."). When that happens we drop the
+    // stale id and recreate so the user can pay without us having to
+    // hand-clean the database.
+    if (customerId) {
+      try {
+        const existing = await stripe.customers.retrieve(customerId);
+        if ((existing as any).deleted) customerId = null;
+      } catch (err: any) {
+        if (err?.code === "resource_missing" || err?.statusCode === 404) {
+          console.warn(
+            `[stripe] stale customer ${customerId} (likely test-mode id under live keys) — recreating`
+          );
+          customerId = null;
+          // Also wipe the dependent subscription columns — they're
+          // also tied to the test-mode account and would otherwise
+          // confuse the webhook handler.
+          await supabaseAdmin
+            .from("profile_players")
+            .update({
+              stripe_customer_id: null,
+              stripe_subscription_id: null,
+              subscription_status: null,
+              current_period_end: null,
+              // Don't auto-downgrade plan here — the webhook will set
+              // it to the correct value after the new checkout
+              // completes. Leaving it preserves visual continuity
+              // during the redirect.
+            })
+            .eq("profile_id", user.id);
+        } else {
+          throw err;
+        }
+      }
+    }
+
     if (!customerId) {
       const customer = await stripe.customers.create({
         email: user.email ?? undefined,
