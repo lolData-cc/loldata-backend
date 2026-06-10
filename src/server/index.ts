@@ -222,6 +222,54 @@ async function stripeWebhookHandler(req: Request) {
   }
 }
 
+// 3.c) CUSTOMER PORTAL SESSION
+// Creates a Stripe-hosted billing portal session for a signed-in
+// subscriber. The portal lets the user update their payment method,
+// download invoices, switch plans and cancel — Stripe handles all
+// the UI + compliance, we just return a one-shot URL.
+async function createPortalSessionHandler(req: Request) {
+  try {
+    const user = await getUserFromSupabaseAuth(req);
+    if (!user) return withCors(new Response("Unauthorized", { status: 401 }));
+
+    // Look up the customer id we stored on the profile.
+    const { data: row } = await supabaseAdmin
+      .from("profile_players")
+      .select("stripe_customer_id")
+      .eq("profile_id", user.id)
+      .single();
+
+    const customerId = row?.stripe_customer_id as string | null;
+    if (!customerId) {
+      // User has never subscribed → no Stripe customer record exists.
+      // Surface a 404 so the frontend can hint "subscribe first".
+      return withCors(
+        new Response(
+          JSON.stringify({ error: "No Stripe customer for this account" }),
+          { status: 404, headers: { "Content-Type": "application/json" } }
+        )
+      );
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      // Always return the user to /dashboard/billing — the page that
+      // initiated the request — so the back-button on the portal
+      // brings them home naturally.
+      return_url: `${process.env.FRONTEND_URL}/dashboard/billing`,
+    });
+
+    return withCors(
+      new Response(JSON.stringify({ url: session.url }), {
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+  } catch (e) {
+    console.error("create-portal-session error", e);
+    return withCors(new Response("Internal Error", { status: 500 }));
+  }
+}
+
 async function withLogAndCors(
   req: Request,
   pathname: string,
@@ -419,6 +467,10 @@ if (pathname === "/api/leaderboard" && req.method === "POST") {
 
 if (pathname === "/api/billing/create-checkout-session" && req.method === "POST") {
   return withLogAndCors(req, pathname, createCheckoutSessionHandler);
+}
+
+if (pathname === "/api/billing/portal-session" && req.method === "POST") {
+  return withLogAndCors(req, pathname, createPortalSessionHandler);
 }
 
 if (pathname === "/api/champion/items" && req.method === "POST") {
