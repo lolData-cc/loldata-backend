@@ -8,6 +8,7 @@ import { getCurrentSeasonWindow } from "../season";
 import { supabaseAdmin } from "../supabase/client";
 import { markIngesting, markDone } from "./ingestionTracker";
 import { snapshotIfTracked } from "./rankSnapshot";
+import { checkBountyForMatch } from "./scoutBounty";
 
 const Q_SOLO = 420;
 const Q_FLEX = 440;
@@ -268,6 +269,34 @@ async function ingestSingleMatch(
       .upsert(participantRows, {
         onConflict: "match_id,participant_id",
       });
+  }
+
+  // Daily Bounty — for every lobby this puuid is in, evaluate this
+  // match against the day's bounty. Atomic first-claim wins. Failures
+  // here MUST NOT break ingestion of the match itself; swallow + log.
+  try {
+    const teamKills = (match.info.participants ?? [])
+      .filter((p: any) => p.teamId === me.teamId)
+      .reduce((sum: number, p: any) => sum + (p.kills ?? 0), 0);
+    const myCs =
+      (me.totalMinionsKilled ?? 0) + (me.neutralMinionsKilled ?? 0);
+
+    await checkBountyForMatch({
+      puuid,
+      kills: me.kills ?? 0,
+      deaths: me.deaths ?? 0,
+      assists: me.assists ?? 0,
+      total_damage_to_champions: me.totalDamageDealtToChampions ?? 0,
+      vision_score: me.visionScore ?? 0,
+      gold_earned: me.goldEarned ?? 0,
+      cs: myCs,
+      win: !!me.win,
+      team_kills: teamKills,
+      game_duration_seconds: durationSec,
+      match_id: matchId,
+    });
+  } catch (err: any) {
+    console.error("[scoutBounty] check failed:", err?.message ?? err);
   }
 
   // Season aggregation
