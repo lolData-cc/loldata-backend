@@ -25,6 +25,30 @@ import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
 import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler, debugScoutSnapshotsHandler } from "./routes/scout";
 import { readScoutBountyTodayHandler, readScoutBountyLeaderboardHandler } from "./routes/scoutBountyRoutes";
+import {
+  createOrReadClaimInviteHandler,
+  deleteClaimInviteHandler,
+  readClaimInviteHandler,
+  claimInviteHandler,
+  patchVerifyBadgeHandler,
+  readLobbyAdminsHandler,
+  promoteAdminHandler,
+  demoteAdminHandler,
+} from "./routes/scoutVerify";
+import {
+  startVerifyAccountHandler,
+  checkVerifyAccountHandler,
+} from "./routes/scoutVerifyAccount";
+import {
+  readScoutChatHandler,
+  postScoutChatHandler,
+} from "./routes/scoutChat";
+import {
+  readMatchSocialBatchHandler,
+  toggleLikeHandler,
+  readCommentsHandler,
+  postCommentHandler,
+} from "./routes/scoutMatchSocial";
 import { getLiveStreamersHandler } from "./twitch";
 import { getLeaderboardHandler } from "./routes/leaderboard";
 import { getChampionItemsHandler } from "./routes/getChampionItems";
@@ -441,7 +465,14 @@ if (pathname === "/api/scout/my-lobbies" && req.method === "GET") {
   return withLogAndCors(req, pathname, readMyScoutLobbiesHandler);
 }
 
-if (pathname.startsWith("/api/scout/lobby/") && req.method === "GET") {
+// GET /api/scout/lobby/<slug>  — bare lobby read.
+// Strict: matches ONLY the bare slug path, not any nested sub-resource
+// (admins, chat, match-social, match/.../comments, etc.) which have
+// their own handlers further down.
+if (
+  /^\/api\/scout\/lobby\/[^/]+$/.test(pathname) &&
+  req.method === "GET"
+) {
   return withLogAndCors(req, pathname, (r) => readScoutLobbyHandler(r, pathname));
 }
 
@@ -449,11 +480,25 @@ if (pathname.startsWith("/api/scout/snapshots-debug/") && req.method === "GET") 
   return withLogAndCors(req, pathname, (r) => debugScoutSnapshotsHandler(r, pathname));
 }
 
-if (pathname.startsWith("/api/scout/lobby/") && req.method === "PATCH") {
+// PATCH /api/scout/lobby/<slug>   — bare lobby update.
+// Excluded: per-player sub-paths (verify-badge etc.) which are
+// matched by more specific handlers further down.
+if (
+  pathname.startsWith("/api/scout/lobby/") &&
+  req.method === "PATCH" &&
+  !pathname.includes("/player/")
+) {
   return withLogAndCors(req, pathname, (r) => updateScoutLobbyHandler(r, pathname));
 }
 
-if (pathname.startsWith("/api/scout/lobby/") && req.method === "DELETE") {
+// DELETE /api/scout/lobby/<slug>  — bare lobby delete.
+// Excluded: per-player claim-invite revoke + per-admin demote.
+if (
+  pathname.startsWith("/api/scout/lobby/") &&
+  req.method === "DELETE" &&
+  !pathname.includes("/player/") &&
+  !pathname.includes("/admins/")
+) {
   return withLogAndCors(req, pathname, (r) => deleteScoutLobbyHandler(r, pathname));
 }
 
@@ -471,6 +516,111 @@ if (pathname.startsWith("/api/scout/bounty/today/") && req.method === "GET") {
 
 if (pathname.startsWith("/api/scout/bounty/leaderboard/") && req.method === "GET") {
   return withLogAndCors(req, pathname, (r) => readScoutBountyLeaderboardHandler(r, pathname));
+}
+
+// ─── Lobby identity verification (Phase 1) ──────────────────────────
+// claim-invite: per-player invite link
+if (
+  pathname.startsWith("/api/scout/lobby/") &&
+  pathname.endsWith("/claim-invite") &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => createOrReadClaimInviteHandler(r, pathname));
+}
+if (
+  pathname.startsWith("/api/scout/lobby/") &&
+  pathname.endsWith("/claim-invite") &&
+  req.method === "DELETE"
+) {
+  return withLogAndCors(req, pathname, (r) => deleteClaimInviteHandler(r, pathname));
+}
+// claim-invite/<token>: public read + authed claim
+if (
+  pathname.startsWith("/api/scout/claim-invite/") &&
+  pathname.endsWith("/claim") &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => claimInviteHandler(r, pathname));
+}
+if (pathname.startsWith("/api/scout/claim-invite/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => readClaimInviteHandler(r, pathname));
+}
+// Per-player verify badge toggle (admin)
+if (
+  pathname.startsWith("/api/scout/lobby/") &&
+  pathname.endsWith("/verify-badge") &&
+  req.method === "PATCH"
+) {
+  return withLogAndCors(req, pathname, (r) => patchVerifyBadgeHandler(r, pathname));
+}
+// Lobby admins
+if (
+  pathname.startsWith("/api/scout/lobby/") &&
+  pathname.endsWith("/admins") &&
+  req.method === "GET"
+) {
+  return withLogAndCors(req, pathname, (r) => readLobbyAdminsHandler(r, pathname));
+}
+if (
+  pathname.startsWith("/api/scout/lobby/") &&
+  pathname.endsWith("/admins") &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => promoteAdminHandler(r, pathname));
+}
+if (
+  /^\/api\/scout\/lobby\/[^/]+\/admins\/[^/]+$/.test(pathname) &&
+  req.method === "DELETE"
+) {
+  return withLogAndCors(req, pathname, (r) => demoteAdminHandler(r, pathname));
+}
+
+// Phase 2 — per-account icon-challenge verification.
+if (pathname === "/api/scout/verify/start" && req.method === "POST") {
+  return withLogAndCors(req, pathname, startVerifyAccountHandler);
+}
+if (pathname === "/api/scout/verify/check" && req.method === "POST") {
+  return withLogAndCors(req, pathname, checkVerifyAccountHandler);
+}
+
+// v3 — per-lobby group chat.
+if (
+  /^\/api\/scout\/lobby\/[^/]+\/chat$/.test(pathname) &&
+  req.method === "GET"
+) {
+  return withLogAndCors(req, pathname, (r) => readScoutChatHandler(r, pathname));
+}
+if (
+  /^\/api\/scout\/lobby\/[^/]+\/chat$/.test(pathname) &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => postScoutChatHandler(r, pathname));
+}
+
+// v4 — per-match likes + comments.
+if (
+  /^\/api\/scout\/lobby\/[^/]+\/match-social$/.test(pathname) &&
+  req.method === "GET"
+) {
+  return withLogAndCors(req, pathname, (r) => readMatchSocialBatchHandler(r, pathname));
+}
+if (
+  /^\/api\/scout\/lobby\/[^/]+\/match\/[^/]+\/like$/.test(pathname) &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => toggleLikeHandler(r, pathname));
+}
+if (
+  /^\/api\/scout\/lobby\/[^/]+\/match\/[^/]+\/comments$/.test(pathname) &&
+  req.method === "GET"
+) {
+  return withLogAndCors(req, pathname, (r) => readCommentsHandler(r, pathname));
+}
+if (
+  /^\/api\/scout\/lobby\/[^/]+\/match\/[^/]+\/comments$/.test(pathname) &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => postCommentHandler(r, pathname));
 }
 
 if (pathname.startsWith("/api/scout/lp-timeline/") && req.method === "GET") {

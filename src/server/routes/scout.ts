@@ -117,6 +117,11 @@ type AccountInput = {
 };
 
 type PlayerInput = {
+  /** Existing scout_lobby_players.id when updating an existing row.
+   *  Null/omitted when adding a fresh player. Used by the PATCH
+   *  handler to do diff-based updates so claim + verify state on
+   *  the row survives the edit. */
+  id?: string | null;
   displayName: string;
   color?: string | null;
   accounts: AccountInput[];
@@ -1811,7 +1816,44 @@ type LeaderboardAccountRow = {
   assists: number;
   avgKda: number;          // Infinity-safe: caps at 99 for "Perfect" runs
   balance: number;         // ladderScore delta since lobby creation (signed)
+  // Longest consecutive-wins streak inside the window. Used by the new
+  // "Longest Streak" sidebar widget.
+  streak: number;
+  // The lobby member this account's player shares the most games with
+  // inside the window (same match_id, same team_id, → played together).
+  // Populated as the "primary partner" so widgets can add a "+ X" badge
+  // when the top entry's stats are largely co-occurring with another
+  // lobby player. Null if there's no shared activity.
+  primaryPartner: {
+    playerId: string;
+    displayName: string;
+    color: string | null;
+    iconId: number | null;
+    sharedGames: number;
+    sharedWins: number;
+  } | null;
 };
+
+// Top-of-the-lobby duo aggregates — surfaced separately so the frontend
+// can pick "single vs duo" per widget. A duo only wins display when its
+// metric strictly exceeds the best individual; on ties the duo wins
+// because the shared narrative is more interesting ("Gabri+Isac 7W"
+// reads better than just "Isac 7W" when both did it together).
+type LeaderboardDuo = {
+  playerIdA: string;
+  playerIdB: string;
+  displayNameA: string;
+  displayNameB: string;
+  colorA: string | null;
+  colorB: string | null;
+  iconIdA: number | null;
+  iconIdB: number | null;
+  sharedGames: number;
+  sharedWins: number;
+};
+type LeaderboardDuoStreak = LeaderboardDuo & { length: number };
+type LeaderboardDuoKda = LeaderboardDuo & { avgKda: number };
+type LeaderboardDuoWinrate = LeaderboardDuo & { winrate: number };
 
 function windowStartIso(window: string): string | null {
   const now = Date.now();
@@ -2251,10 +2293,13 @@ export async function readScoutLeaderboardHandler(
   }
 
   // 3. Aggregate participants per (puuid) in window.
+  //    Also build a per-puuid chronological match sequence we later use
+  //    to compute (a) longest individual win-streak and (b) per-pair
+  //    shared streaks — the data the new "Longest Streak" widget needs.
   let q = supabaseAdmin
     .from("participants")
     .select(
-      "puuid, match_id, win, kills, deaths, assists, matches!inner(game_creation, queue_id)"
+      "puuid, match_id, team_id, win, kills, deaths, assists, matches!inner(game_creation, queue_id)"
     )
     .in("puuid", allPuuids);
   if (startIso) q = q.gte("matches.game_creation", startIso);
@@ -2271,9 +2316,18 @@ export async function readScoutLeaderboardHandler(
     deaths: number;
     assists: number;
   };
+  type SeqEntry = {
+    gameCreation: number;   // ms epoch — sortable
+    matchId: string;
+    teamId: number | null;
+    win: boolean;
+  };
+
   const byPuuid = new Map<string, Agg>();
+  const seqByPuuid = new Map<string, SeqEntry[]>();
   for (const a of accountList) {
     byPuuid.set(a.puuid, { games: 0, wins: 0, kills: 0, deaths: 0, assists: 0 });
+    seqByPuuid.set(a.puuid, []);
   }
   // Dedupe (puuid, matchId) — a row should count once even if duplicated.
   const seen = new Set<string>();
@@ -2288,6 +2342,23 @@ export async function readScoutLeaderboardHandler(
     agg.kills += r.kills ?? 0;
     agg.deaths += r.deaths ?? 0;
     agg.assists += r.assists ?? 0;
+
+    const seq = seqByPuuid.get(r.puuid);
+    if (seq) {
+      const gc = r.matches?.game_creation
+        ? new Date(r.matches.game_creation).getTime()
+        : 0;
+      seq.push({
+        gameCreation: gc,
+        matchId: r.match_id,
+        teamId: r.team_id ?? null,
+        win: !!r.win,
+      });
+    }
+  }
+  // Sort each puuid's sequence oldest → newest for the streak walk.
+  for (const seq of seqByPuuid.values()) {
+    seq.sort((a, b) => a.gameCreation - b.gameCreation);
   }
 
   // 4. Snapshot lookups — current rank (latest) + LP delta in window.
@@ -2354,6 +2425,203 @@ export async function readScoutLeaderboardHandler(
     }
   }
 
+  // 4b. Streak + duo computation.
+  //
+  // We collapse the per-puuid sequence into a per-(lobby-player) sequence
+  // first — a single human can have multiple Riot accounts in the lobby,
+  // and a "winstreak" is owned by the human, not the account.
+  //   - Dedup by match_id within a player (one match can only be played
+  //     by one of their accounts at a time)
+  //   - Sort each player's combined sequence chronologically
+  //
+  // Then:
+  //   - longestIndividualStreak[playerId] = max consecutive `win=true`
+  //     run in their sequence
+  //   - shared streak for a pair (P1, P2) = walk the matches where BOTH
+  //     played AND were on the same team_id, sorted by gameCreation,
+  //     max consecutive `win=true` run (since same team → both same win)
+  //   - primaryPartner[playerId] = the OTHER lobby player they share
+  //     the most games with (decorates other widgets like "+ Isac")
+
+  type PlayerMatch = {
+    gameCreation: number;
+    matchId: string;
+    teamId: number | null;
+    win: boolean;
+  };
+  const seqByPlayer = new Map<string, Map<string, PlayerMatch>>();
+  const playerInfoById = new Map<
+    string,
+    { displayName: string; color: string | null; iconId: number | null }
+  >();
+  for (const a of accountList) {
+    if (!seqByPlayer.has(a.playerId)) {
+      seqByPlayer.set(a.playerId, new Map());
+    }
+    if (!playerInfoById.has(a.playerId)) {
+      playerInfoById.set(a.playerId, {
+        displayName: a.playerDisplayName,
+        color: a.color,
+        iconId: iconByPuuid.get(a.puuid) ?? null,
+      });
+    }
+    const seq = seqByPuuid.get(a.puuid) ?? [];
+    const pMap = seqByPlayer.get(a.playerId)!;
+    for (const m of seq) {
+      // First-write-wins dedup — if a player somehow has two accounts in
+      // the same match the row is identical anyway (same team_id, win).
+      if (!pMap.has(m.matchId)) pMap.set(m.matchId, m);
+    }
+  }
+
+  // Sorted arrays per player for fast streak walks.
+  const sortedSeqByPlayer = new Map<string, PlayerMatch[]>();
+  for (const [pid, mp] of seqByPlayer) {
+    const arr = [...mp.values()].sort(
+      (a, b) => a.gameCreation - b.gameCreation
+    );
+    sortedSeqByPlayer.set(pid, arr);
+  }
+
+  function longestWinRun(seq: PlayerMatch[]): number {
+    let longest = 0;
+    let current = 0;
+    for (const m of seq) {
+      if (m.win) {
+        current += 1;
+        if (current > longest) longest = current;
+      } else {
+        current = 0;
+      }
+    }
+    return longest;
+  }
+
+  const longestStreakByPlayer = new Map<string, number>();
+  for (const [pid, seq] of sortedSeqByPlayer) {
+    longestStreakByPlayer.set(pid, longestWinRun(seq));
+  }
+
+  // Pair walks: O(P²) pairs * O(avgMatches) per pair. Fine for ≤20
+  // players which is the realistic lobby ceiling.
+  const playerIds = [...sortedSeqByPlayer.keys()];
+  let topDuoStreak: LeaderboardDuoStreak | null = null;
+  let topDuoKda: LeaderboardDuoKda | null = null;
+  let topDuoWinrate: LeaderboardDuoWinrate | null = null;
+
+  // Per-puuid kills/deaths/assists per match (for duo KDA aggregation).
+  // We need a lookup of kills/deaths/assists per (puuid, matchId).
+  const statByPuuidMatch = new Map<string, { k: number; d: number; a: number; teamId: number | null }>();
+  for (const r of (partRows ?? []) as any[]) {
+    const key = `${r.puuid}:${r.match_id}`;
+    statByPuuidMatch.set(key, {
+      k: r.kills ?? 0,
+      d: r.deaths ?? 0,
+      a: r.assists ?? 0,
+      teamId: r.team_id ?? null,
+    });
+  }
+
+  // For each player, track their primary partner (most-shared lobby member).
+  const partnerByPlayer = new Map<
+    string,
+    { playerId: string; sharedGames: number; sharedWins: number }
+  >();
+
+  for (let i = 0; i < playerIds.length; i++) {
+    const A = playerIds[i];
+    const aSeq = seqByPlayer.get(A)!;
+    for (let j = i + 1; j < playerIds.length; j++) {
+      const B = playerIds[j];
+      const bSeq = seqByPlayer.get(B)!;
+
+      // Shared matches with SAME team_id (i.e. they played together,
+      // not on opposing sides of a custom or anything weird).
+      const shared: PlayerMatch[] = [];
+      for (const [matchId, aEntry] of aSeq) {
+        const bEntry = bSeq.get(matchId);
+        if (!bEntry) continue;
+        if (aEntry.teamId !== bEntry.teamId) continue;
+        shared.push(aEntry);
+      }
+      if (shared.length === 0) continue;
+      shared.sort((x, y) => x.gameCreation - y.gameCreation);
+
+      const sharedWins = shared.filter((m) => m.win).length;
+      const sharedGames = shared.length;
+
+      // Update primary partner for both directions if this is the most
+      // games either of them has shared with someone so far.
+      const curA = partnerByPlayer.get(A);
+      if (!curA || sharedGames > curA.sharedGames) {
+        partnerByPlayer.set(A, {
+          playerId: B,
+          sharedGames,
+          sharedWins,
+        });
+      }
+      const curB = partnerByPlayer.get(B);
+      if (!curB || sharedGames > curB.sharedGames) {
+        partnerByPlayer.set(B, {
+          playerId: A,
+          sharedGames,
+          sharedWins,
+        });
+      }
+
+      // Streak for this pair.
+      const pairStreak = longestWinRun(shared);
+
+      // Duo KDA: average across the shared matches, using both members'
+      // numbers per match. Pick all A-puuids participating + all B-puuids
+      // participating for each shared match.
+      let dk = 0, dd = 0, da = 0;
+      for (const m of shared) {
+        for (const a of accountList) {
+          if (a.playerId !== A && a.playerId !== B) continue;
+          const stat = statByPuuidMatch.get(`${a.puuid}:${m.matchId}`);
+          if (!stat) continue;
+          dk += stat.k;
+          dd += stat.d;
+          da += stat.a;
+        }
+      }
+      const duoAvgKda =
+        dd === 0 ? Math.min(99, dk + da) : (dk + da) / dd;
+      const duoWinrate =
+        sharedGames > 0 ? Math.round((sharedWins / sharedGames) * 100) : 0;
+
+      const aInfo = playerInfoById.get(A)!;
+      const bInfo = playerInfoById.get(B)!;
+      const duoBase: LeaderboardDuo = {
+        playerIdA: A,
+        playerIdB: B,
+        displayNameA: aInfo.displayName,
+        displayNameB: bInfo.displayName,
+        colorA: aInfo.color,
+        colorB: bInfo.color,
+        iconIdA: aInfo.iconId,
+        iconIdB: bInfo.iconId,
+        sharedGames,
+        sharedWins,
+      };
+
+      if (pairStreak > 0 && (!topDuoStreak || pairStreak > topDuoStreak.length)) {
+        topDuoStreak = { ...duoBase, length: pairStreak };
+      }
+      // KDA needs a minimum sample so a single 7-kill game doesn't claim
+      // "Top duo." Same threshold as the individual KDA picker — floor 3.
+      if (sharedGames >= 3) {
+        if (!topDuoKda || duoAvgKda > topDuoKda.avgKda) {
+          topDuoKda = { ...duoBase, avgKda: duoAvgKda };
+        }
+        if (!topDuoWinrate || duoWinrate > topDuoWinrate.winrate) {
+          topDuoWinrate = { ...duoBase, winrate: duoWinrate };
+        }
+      }
+    }
+  }
+
   // 5. Build rows — one per account.
   const accountRows: LeaderboardAccountRow[] = accountList.map((a) => {
     const agg = byPuuid.get(a.puuid) ?? {
@@ -2369,6 +2637,12 @@ export async function readScoutLeaderboardHandler(
       agg.deaths === 0
         ? Math.min(99, agg.kills + agg.assists)
         : (agg.kills + agg.assists) / agg.deaths;
+
+    // Streak and primary partner are per-PLAYER (not per-account) so
+    // multiple Riot accounts owned by the same person share these values.
+    const playerStreak = longestStreakByPlayer.get(a.playerId) ?? 0;
+    const partner = partnerByPlayer.get(a.playerId) ?? null;
+    const partnerInfo = partner ? playerInfoById.get(partner.playerId) : null;
 
     return {
       puuid: a.puuid,
@@ -2389,10 +2663,27 @@ export async function readScoutLeaderboardHandler(
       assists: agg.assists,
       avgKda,
       balance: balanceByPuuid.get(a.puuid) ?? 0,
+      streak: playerStreak,
+      primaryPartner:
+        partner && partnerInfo
+          ? {
+              playerId: partner.playerId,
+              displayName: partnerInfo.displayName,
+              color: partnerInfo.color,
+              iconId: partnerInfo.iconId,
+              sharedGames: partner.sharedGames,
+              sharedWins: partner.sharedWins,
+            }
+          : null,
     };
   });
 
-  return Response.json({ accounts: accountRows });
+  return Response.json({
+    accounts: accountRows,
+    topDuoStreak,
+    topDuoKda,
+    topDuoWinrate,
+  });
 }
 
 // ─── GET /api/scout/feed/:slug ──────────────────────────────────────────
@@ -2526,11 +2817,13 @@ export async function readScoutFeedHandler(
     if (Number.isFinite(asNum) && asNum > 0) cursorNum = asNum;
   }
 
-  // 1. Resolve lobby accounts → puuid + region map
+  // 1. Resolve lobby accounts → puuid + region map.
+  //    Also pull claim/verify columns so the feed can decorate player
+  //    names with the green Meta-style verify badge.
   const { data: accounts, error: accErr } = await supabaseAdmin
     .from("scout_lobby_accounts")
     .select(
-      "puuid, region, lobby_player_id, scout_lobby_players!inner(id, display_name, color, lobby_slug)"
+      "puuid, region, lobby_player_id, verified_at, scout_lobby_players!inner(id, display_name, color, lobby_slug, claimed_by_profile_id, show_verify_badge)"
     )
     .eq("scout_lobby_players.lobby_slug", slug);
 
@@ -2542,18 +2835,74 @@ export async function readScoutFeedHandler(
     return Response.json({ items: [], nextCursor: null });
   }
 
+  // Verify mode clamp — same policy as readScoutLobbyHandler.
+  const { data: lobbyRow } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select("verify_mode")
+    .eq("slug", slug)
+    .maybeSingle();
+  const verifyMode =
+    (((lobbyRow as any)?.verify_mode as
+      | "disabled" | "claim_only" | "full" | null) ?? "full");
+
   type LobbyPlayerInfo = {
     playerId: string;
     displayName: string;
     color: string | null;
+    showVerifyBadge: boolean;
+    verifyGrade: 0 | 1 | 2;
   };
+  // First pass: per-player aggregation of claimed + all-accounts-verified.
+  type PlayerAgg = {
+    displayName: string;
+    color: string | null;
+    isClaimed: boolean;
+    showVerifyBadge: boolean;
+    totalAccounts: number;
+    verifiedAccounts: number;
+  };
+  const playerAggById = new Map<string, PlayerAgg>();
+  for (const a of accounts as any[]) {
+    const pid = a.scout_lobby_players.id;
+    let agg = playerAggById.get(pid);
+    if (!agg) {
+      agg = {
+        displayName: a.scout_lobby_players.display_name,
+        color: a.scout_lobby_players.color,
+        isClaimed: !!a.scout_lobby_players.claimed_by_profile_id,
+        showVerifyBadge: !!a.scout_lobby_players.show_verify_badge,
+        totalAccounts: 0,
+        verifiedAccounts: 0,
+      };
+      playerAggById.set(pid, agg);
+    }
+    agg.totalAccounts += 1;
+    if (a.verified_at) agg.verifiedAccounts += 1;
+  }
+
   const puuidToPlayers = new Map<string, LobbyPlayerInfo[]>();
   const puuidToRegion = new Map<string, string>();
   for (const a of accounts as any[]) {
+    const pid = a.scout_lobby_players.id;
+    const agg = playerAggById.get(pid)!;
+    let verifyGrade: 0 | 1 | 2 = 0;
+    if (agg.isClaimed) {
+      verifyGrade =
+        agg.totalAccounts > 0 && agg.verifiedAccounts === agg.totalAccounts
+          ? 2
+          : 1;
+    }
+    // Apply same verify_mode clamp the lobby handler does.
+    if (verifyMode === "disabled") verifyGrade = 0;
+    else if (verifyMode === "claim_only" && verifyGrade === 2) verifyGrade = 1;
+    const effectiveShowBadge =
+      verifyMode !== "disabled" && agg.showVerifyBadge;
     const lp: LobbyPlayerInfo = {
-      playerId: a.scout_lobby_players.id,
-      displayName: a.scout_lobby_players.display_name,
-      color: a.scout_lobby_players.color,
+      playerId: pid,
+      displayName: agg.displayName,
+      color: agg.color,
+      showVerifyBadge: effectiveShowBadge,
+      verifyGrade,
     };
     if (!puuidToPlayers.has(a.puuid)) puuidToPlayers.set(a.puuid, []);
     puuidToPlayers.get(a.puuid)!.push(lp);
@@ -3086,49 +3435,175 @@ export async function updateScoutLobbyHandler(
   if (body.heroChampion !== undefined) {
     lobbyUpdate.hero_champion = body.heroChampion?.trim() || null;
   }
+  // v3 config: enabled tab list + verification mode. Validate
+  // strictly so the CHECK constraint doesn't reject the write.
+  if ((body as any).enabledTabs !== undefined) {
+    const arr = (body as any).enabledTabs;
+    if (
+      Array.isArray(arr) &&
+      arr.every((s) => typeof s === "string" && /^[a-z0-9_-]{1,32}$/.test(s))
+    ) {
+      lobbyUpdate.enabled_tabs = arr;
+    }
+  }
+  if ((body as any).verifyMode !== undefined) {
+    const vm = (body as any).verifyMode;
+    if (vm === "disabled" || vm === "claim_only" || vm === "full") {
+      lobbyUpdate.verify_mode = vm;
+    }
+  }
   await supabaseAdmin
     .from("scout_lobbies")
     .update(lobbyUpdate)
     .eq("slug", slug);
 
-  // 4. Wipe + re-insert players. ON DELETE CASCADE removes their accounts.
-  await supabaseAdmin
-    .from("scout_lobby_players")
-    .delete()
-    .eq("lobby_slug", slug);
+  // 4. Diff-based update of players + accounts.
+  //
+  // The old "DELETE all + INSERT" approach wiped claim/verify state on
+  // every save because scout_lobby_players carries claimed_by_profile_id
+  // and scout_lobby_accounts carries verified_at + verification_target_*
+  // — all of which got nuked the moment an admin saved any edit. We
+  // now do a proper diff:
+  //
+  //   players:
+  //     • body.id matches existing → UPDATE display_name + color + order
+  //     • body.id null / not found → INSERT new row
+  //     • existing in DB but not in body → DELETE
+  //
+  //   accounts (per surviving/new player):
+  //     • puuid matches existing → UPDATE riot_name/tag/order/is_primary
+  //     • puuid not yet present → INSERT
+  //     • existing puuid not in body → DELETE
+  //
+  // claim/verify rows survive because we never delete the parent
+  // player or its accounts unless they're explicitly removed.
 
+  const { data: existingPlayers } = await supabaseAdmin
+    .from("scout_lobby_players")
+    .select("id, display_name, color, order_index")
+    .eq("lobby_slug", slug);
+  const existingPlayerIds = new Set(
+    (existingPlayers ?? []).map((p: any) => p.id as string)
+  );
+  const incomingIds = new Set<string>();
+
+  // First pass: upsert each incoming player and capture its id.
+  const resolvedPlayerIds: string[] = [];
   for (let pIdx = 0; pIdx < players.length; pIdx++) {
     const p = players[pIdx];
-    const { data: playerRow, error: playerErr } = await supabaseAdmin
+    const incomingId =
+      typeof (p as any).id === "string" ? ((p as any).id as string) : null;
+
+    let playerId: string;
+    if (incomingId && existingPlayerIds.has(incomingId)) {
+      // UPDATE in place — preserves claim/verify state.
+      const { error: upErr } = await supabaseAdmin
+        .from("scout_lobby_players")
+        .update({
+          display_name: p.displayName.trim(),
+          color: p.color ?? null,
+          order_index: pIdx,
+        })
+        .eq("id", incomingId);
+      if (upErr) {
+        console.error("scout update: player update error:", upErr);
+        return Response.json({ error: "Failed to update players" }, { status: 500 });
+      }
+      playerId = incomingId;
+    } else {
+      // Brand new row.
+      const { data: row, error: insErr } = await supabaseAdmin
+        .from("scout_lobby_players")
+        .insert({
+          lobby_slug: slug,
+          display_name: p.displayName.trim(),
+          color: p.color ?? null,
+          order_index: pIdx,
+        })
+        .select("id")
+        .single();
+      if (insErr || !row) {
+        console.error("scout update: player insert error:", insErr);
+        return Response.json({ error: "Failed to update players" }, { status: 500 });
+      }
+      playerId = row.id;
+    }
+    incomingIds.add(playerId);
+    resolvedPlayerIds.push(playerId);
+  }
+
+  // Delete players the admin removed. ON DELETE CASCADE wipes their
+  // accounts — and that's correct: if the human's removed from the
+  // lobby their claim+verify history goes with them.
+  const idsToDelete = [...existingPlayerIds].filter(
+    (id) => !incomingIds.has(id)
+  );
+  if (idsToDelete.length > 0) {
+    await supabaseAdmin
       .from("scout_lobby_players")
-      .insert({
-        lobby_slug: slug,
-        display_name: p.displayName.trim(),
-        color: p.color ?? null,
-        order_index: pIdx,
-      })
-      .select("id")
-      .single();
-    if (playerErr || !playerRow) {
-      console.error("scout update: player insert error:", playerErr);
-      return Response.json({ error: "Failed to update players" }, { status: 500 });
+      .delete()
+      .in("id", idsToDelete);
+  }
+
+  // Second pass: per-player account diff. Match on puuid because
+  // that's what survives (riot_name etc. can change without breaking
+  // identity).
+  for (let pIdx = 0; pIdx < players.length; pIdx++) {
+    const p = players[pIdx];
+    const playerId = resolvedPlayerIds[pIdx];
+
+    const { data: existingAccounts } = await supabaseAdmin
+      .from("scout_lobby_accounts")
+      .select("id, puuid")
+      .eq("lobby_player_id", playerId);
+    const existingByPuuid = new Map<string, string>(
+      (existingAccounts ?? []).map((a: any) => [a.puuid, a.id])
+    );
+    const keepPuuids = new Set<string>();
+
+    for (let aIdx = 0; aIdx < p.accounts.length; aIdx++) {
+      const a = p.accounts[aIdx];
+      keepPuuids.add(a.puuid);
+      const existingId = existingByPuuid.get(a.puuid);
+      const payload = {
+        lobby_player_id: playerId,
+        puuid: a.puuid,
+        region: a.region.toUpperCase(),
+        riot_name: a.riotName,
+        riot_tag: a.riotTag,
+        is_primary: aIdx === 0,
+        order_index: aIdx,
+      };
+      if (existingId) {
+        const { error: upErr } = await supabaseAdmin
+          .from("scout_lobby_accounts")
+          .update(payload)
+          .eq("id", existingId);
+        if (upErr) {
+          console.error("scout update: account update error:", upErr);
+          return Response.json({ error: "Failed to update accounts" }, { status: 500 });
+        }
+      } else {
+        const { error: insErr } = await supabaseAdmin
+          .from("scout_lobby_accounts")
+          .insert(payload);
+        if (insErr) {
+          console.error("scout update: account insert error:", insErr);
+          return Response.json({ error: "Failed to update accounts" }, { status: 500 });
+        }
+      }
     }
 
-    const accountRows = p.accounts.map((a, aIdx) => ({
-      lobby_player_id: playerRow.id,
-      puuid: a.puuid,
-      region: a.region.toUpperCase(),
-      riot_name: a.riotName,
-      riot_tag: a.riotTag,
-      is_primary: aIdx === 0,
-      order_index: aIdx,
-    }));
-    const { error: accErr } = await supabaseAdmin
-      .from("scout_lobby_accounts")
-      .insert(accountRows);
-    if (accErr) {
-      console.error("scout update: accounts insert error:", accErr);
-      return Response.json({ error: "Failed to update accounts" }, { status: 500 });
+    // Remove accounts no longer in the player's set.
+    const accountIdsToDelete: string[] = [];
+    for (const [puuid, id] of existingByPuuid) {
+      if (!keepPuuids.has(puuid)) accountIdsToDelete.push(id);
+    }
+    if (accountIdsToDelete.length > 0) {
+      await supabaseAdmin
+        .from("scout_lobby_accounts")
+        .delete()
+        .in("id", accountIdsToDelete);
     }
   }
 
@@ -3327,7 +3802,9 @@ export async function readScoutLobbyHandler(
 
   const { data: lobby, error: lobbyErr } = await supabaseAdmin
     .from("scout_lobbies")
-    .select("slug, name, is_public, created_at, last_active_at, last_refresh_at, owner_user_id, hero_champion")
+    .select(
+      "slug, name, is_public, created_at, last_active_at, last_refresh_at, owner_user_id, hero_champion, enabled_tabs, verify_mode"
+    )
     .eq("slug", slug)
     .maybeSingle();
 
@@ -3340,7 +3817,7 @@ export async function readScoutLobbyHandler(
   const { data: players, error: playersErr } = await supabaseAdmin
     .from("scout_lobby_players")
     .select(
-      "id, display_name, color, order_index, scout_lobby_accounts(id, puuid, region, riot_name, riot_tag, is_primary, order_index)"
+      "id, display_name, color, order_index, claimed_by_profile_id, claimed_at, show_verify_badge, scout_lobby_accounts(id, puuid, region, riot_name, riot_tag, is_primary, order_index, verified_at)"
     )
     .eq("lobby_slug", slug)
     .order("order_index", { ascending: true });
@@ -3350,13 +3827,14 @@ export async function readScoutLobbyHandler(
     return Response.json({ error: "Failed to read players" }, { status: 500 });
   }
 
-  // Sort accounts within each player by order_index
-  const normalizedPlayers = (players ?? []).map((p: any) => ({
-    id: p.id,
-    displayName: p.display_name,
-    color: p.color,
-    orderIndex: p.order_index,
-    accounts: (p.scout_lobby_accounts ?? [])
+  // Sort accounts within each player by order_index. Compute the
+  // identity-verification grade:
+  //   • grade 0 — not claimed
+  //   • grade 1 — claimed, but at least one Riot account is unverified
+  //   • grade 2 — claimed AND every Riot account has verified_at set
+  // (Per user spec: Grade 2 requires ALL accounts, not just one.)
+  const normalizedPlayers = (players ?? []).map((p: any) => {
+    const accounts = (p.scout_lobby_accounts ?? [])
       .sort((a: any, b: any) => a.order_index - b.order_index)
       .map((a: any) => ({
         id: a.id,
@@ -3366,8 +3844,39 @@ export async function readScoutLobbyHandler(
         riotTag: a.riot_tag,
         isPrimary: a.is_primary,
         orderIndex: a.order_index,
-      })),
-  }));
+        verifiedAt: a.verified_at ?? null,
+      }));
+    const isClaimed = !!p.claimed_by_profile_id;
+    const allAccountsVerified =
+      accounts.length > 0 && accounts.every((a: any) => !!a.verifiedAt);
+    // Compute the raw grade, then clamp by verify_mode so the
+    // frontend never has to know about the policy:
+    //   • disabled   → grade always 0, badge always off
+    //   • claim_only → max grade 1 (no Grade 2 even if accounts verified)
+    //   • full       → grade as computed
+    const verifyMode =
+      ((lobby as any).verify_mode as "disabled" | "claim_only" | "full" | null) ??
+      "full";
+    let verifyGrade: 0 | 1 | 2 = 0;
+    if (isClaimed) verifyGrade = allAccountsVerified ? 2 : 1;
+    if (verifyMode === "disabled") verifyGrade = 0;
+    else if (verifyMode === "claim_only" && verifyGrade === 2) verifyGrade = 1;
+
+    const effectiveShowBadge =
+      verifyMode !== "disabled" && !!p.show_verify_badge;
+
+    return {
+      id: p.id,
+      displayName: p.display_name,
+      color: p.color,
+      orderIndex: p.order_index,
+      claimedByProfileId: p.claimed_by_profile_id ?? null,
+      claimedAt: p.claimed_at ?? null,
+      showVerifyBadge: effectiveShowBadge,
+      verifyGrade,
+      accounts,
+    };
+  });
 
   // Enrich each player with a profile icon. We pick the primary account's
   // puuid (fallback: first account) and look up icon_id from the cached
@@ -3459,6 +3968,18 @@ export async function readScoutLobbyHandler(
     }
   }
 
+  // Lobby admins — creator + co-admins. The frontend uses this to
+  // gate the Edit dialog visibility and the Verify FAB visibility.
+  const { data: adminRows } = await supabaseAdmin
+    .from("scout_lobby_admins")
+    .select("profile_id, granted_at, granted_by")
+    .eq("lobby_slug", slug);
+  const admins = (adminRows ?? []).map((a) => ({
+    profileId: a.profile_id,
+    grantedAt: a.granted_at,
+    grantedBy: a.granted_by,
+  }));
+
   return Response.json({
     slug: lobby.slug,
     name: lobby.name,
@@ -3468,7 +3989,14 @@ export async function readScoutLobbyHandler(
     lastRefreshAt: lobby.last_refresh_at ?? null,
     ownerUserId: lobby.owner_user_id ?? null,
     heroChampion: lobby.hero_champion ?? null,
+    enabledTabs: (lobby as any).enabled_tabs ?? [
+      "matches", "stats", "champions", "habits",
+      "live", "leaderboard", "trending",
+    ],
+    verifyMode: ((lobby as any).verify_mode as
+      | "disabled" | "claim_only" | "full" | null) ?? "full",
     players: playersWithRank,
+    admins,
   });
 }
 
