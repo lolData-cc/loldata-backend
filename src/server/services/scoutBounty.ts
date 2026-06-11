@@ -76,8 +76,25 @@ export type BountyParticipantSnapshot = {
 };
 
 // ─── Day helpers ────────────────────────────────────────────────────
-function todayUtcDateString(): string {
-  return new Date().toISOString().slice(0, 10);
+// The daily bounty rolls over at LOCAL midnight (Europe/Rome), not UTC
+// midnight. loldata's audience is primarily Italian, and "daily"
+// should mean their calendar day — otherwise the bounty resets at
+// 02:00 (CEST) / 01:00 (CET), which feels broken to users who play
+// past midnight. Intl handles CET/CEST DST automatically.
+//
+// The DB column is still named `day_utc` for backwards-compat, but it
+// now stores the Europe/Rome local date (YYYY-MM-DD).
+const BOUNTY_TIMEZONE = "Europe/Rome";
+
+function todayLocalDateString(): string {
+  // en-CA locale formats as YYYY-MM-DD, which is exactly the shape we
+  // store in day_utc.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: BOUNTY_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }
 
 // ─── Template pool ──────────────────────────────────────────────────
@@ -119,7 +136,7 @@ function pickRandomTemplate(pool: BountyTemplate[]): BountyTemplate | null {
 export async function ensureDailyBounty(
   lobbySlug: string
 ): Promise<{ bounty: BountyDaily; template: BountyTemplate } | null> {
-  const today = todayUtcDateString();
+  const today = todayLocalDateString();
 
   // Fast path: row already exists for today.
   const { data: existing, error: readErr } = await supabaseAdmin
@@ -267,23 +284,35 @@ export async function checkBountyForMatch(
   }
 
   for (const mem of mems) {
-    const today = todayUtcDateString();
+    const today = todayLocalDateString();
     const { data: bounty } = await supabaseAdmin
       .from("scout_bounty_daily")
-      .select("id, template_id, claimed_at")
+      .select("id, template_id, claimed_at, claimed_value")
       .eq("lobby_slug", mem.lobby_slug)
       .eq("day_utc", today)
       .maybeSingle();
 
-    if (!bounty || bounty.claimed_at) continue;
+    if (!bounty) continue;
 
     const tpl = await getTemplateById(bounty.template_id);
     if (!tpl) continue;
 
     const value = evaluateMetric(tpl.metric, tpl.threshold, participant);
-    if (value === null) continue;
+    if (value === null) continue; // didn't even clear the threshold
 
-    // Atomic claim — only succeeds if no one beat us to it.
+    // Competitive claim — the bounty is HELD by whoever has the best
+    // value, not just the first to clear the threshold. A new match
+    // overtakes the current holder when its value beats theirs.
+    //   • most metrics → higher is better
+    //   • quick_win    → lower (faster) is better
+    // The atomic guard `claimed_at IS NULL OR claimed_value {cmp} value`
+    // is evaluated under Postgres row-locking, so two concurrent
+    // ingests on the same bounty serialise and the best value wins
+    // (no lost updates).
+    const lowerIsBetter = tpl.metric === "quick_win";
+    const cmp = lowerIsBetter ? "gt" : "lt"; // current value is WORSE when …
+    const orFilter = `claimed_at.is.null,claimed_value.${cmp}.${value}`;
+
     const { data: updated, error: updErr } = await supabaseAdmin
       .from("scout_bounty_daily")
       .update({
@@ -294,14 +323,16 @@ export async function checkBountyForMatch(
         claimed_value: value,
       })
       .eq("id", bounty.id)
-      .is("claimed_at", null)
+      .or(orFilter)
       .select("id");
 
     if (!updErr && updated && updated.length > 0) {
       claimedLobbies.push(mem.lobby_slug);
+      const verb =
+        bounty.claimed_at == null ? "claimed" : "overtook";
       logger.info(
         "scoutBounty",
-        `claimed [${tpl.code}] in ${mem.lobby_slug} by ${participant.puuid.slice(0, 8)} (value=${value})`
+        `${verb} [${tpl.code}] in ${mem.lobby_slug} by ${participant.puuid.slice(0, 8)} (value=${value}, prev=${bounty.claimed_value ?? "none"})`
       );
     }
   }

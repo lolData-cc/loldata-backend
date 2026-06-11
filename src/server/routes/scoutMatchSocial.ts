@@ -293,16 +293,11 @@ export async function postCommentHandler(
       ? body.parentCommentId
       : null;
 
-  // Verify-mode gating, same policy as chat:
-  //   • disabled  → anyone signed in
-  //   • else      → must be claimed in this lobby
-  const { data: lobby } = await supabaseAdmin
-    .from("scout_lobbies")
-    .select("verify_mode")
-    .eq("slug", slug)
-    .maybeSingle();
-  if (!lobby) return errorJson(404, "lobby not found");
-
+  // Commenting requires a CLAIMED (certified) identity in this lobby —
+  // always, regardless of verify_mode. There is no anonymous posting:
+  // every comment is attributable to a claimed lobby member. (Earlier
+  // a verify_mode='disabled' bypass let any signed-in user post as
+  // "Anonymous"; that's removed.)
   const { data: claimedPlayer } = await supabaseAdmin
     .from("scout_lobby_players")
     .select("id, display_name, color")
@@ -310,16 +305,16 @@ export async function postCommentHandler(
     .eq("claimed_by_profile_id", userId)
     .maybeSingle();
 
-  if ((lobby as any).verify_mode !== "disabled" && !claimedPlayer) {
+  if (!claimedPlayer) {
     return errorJson(
       403,
       "claim an identity in this lobby to comment"
     );
   }
 
-  const displayName = claimedPlayer?.display_name ?? "Anonymous";
-  const color = claimedPlayer?.color ?? null;
-  const lobbyPlayerId = claimedPlayer?.id ?? null;
+  const displayName = claimedPlayer.display_name;
+  const color = claimedPlayer.color ?? null;
+  const lobbyPlayerId = claimedPlayer.id;
 
   // If a parent comment id was supplied, validate it belongs to this
   // same (lobby_slug, match_id) so we can't cross-thread replies.

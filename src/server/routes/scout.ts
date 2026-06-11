@@ -2802,6 +2802,43 @@ export async function readScoutFeedHandler(
   const slug = pathname.split("/").pop();
   if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
 
+  // Private-lobby gate — mirror readScoutLobbyHandler. A private
+  // lobby's feed is only served to claimed members + admins; others
+  // get an empty feed (the frontend shows a locked body anyway, but
+  // this prevents reading the data via a direct API call).
+  {
+    const { data: lobbyMeta } = await supabaseAdmin
+      .from("scout_lobbies")
+      .select("is_public, owner_user_id")
+      .eq("slug", slug)
+      .maybeSingle();
+    if (lobbyMeta && lobbyMeta.is_public === false) {
+      let allowed = false;
+      const viewerId = await getAuthUserId(req);
+      if (viewerId) {
+        const [{ data: claimed }, { data: admin }] = await Promise.all([
+          supabaseAdmin
+            .from("scout_lobby_players")
+            .select("id")
+            .eq("lobby_slug", slug)
+            .eq("claimed_by_profile_id", viewerId)
+            .maybeSingle(),
+          supabaseAdmin
+            .from("scout_lobby_admins")
+            .select("profile_id")
+            .eq("lobby_slug", slug)
+            .eq("profile_id", viewerId)
+            .maybeSingle(),
+        ]);
+        allowed =
+          !!claimed || !!admin || viewerId === lobbyMeta.owner_user_id;
+      }
+      if (!allowed) {
+        return Response.json({ items: [], nextCursor: null, locked: true });
+      }
+    }
+  }
+
   const url = new URL(req.url);
   const rawCursor = url.searchParams.get("cursor"); // numeric ID stringified
   const limitRaw = Number(url.searchParams.get("limit") ?? FEED_DEFAULT_LIMIT);
@@ -3794,7 +3831,7 @@ export async function refreshScoutLobbyHandler(
 // Public read. Returns the lobby + nested players + accounts.
 // owner_key + password_hash are stripped from the response.
 export async function readScoutLobbyHandler(
-  _req: Request,
+  req: Request,
   pathname: string
 ): Promise<Response> {
   const slug = pathname.split("/").pop();
@@ -3813,6 +3850,56 @@ export async function readScoutLobbyHandler(
     return Response.json({ error: "Failed to read lobby" }, { status: 500 });
   }
   if (!lobby) return Response.json({ error: "Not found" }, { status: 404 });
+
+  // Private-lobby gate. A private lobby's full content (players, ranks,
+  // accounts, admins) is only returned to "members" — users who have
+  // claimed an identity in the lobby OR are admins. Everyone else gets
+  // a LOCKED stub with just the hero info (name + splash) so the
+  // frontend can render the banner + a "this lobby is private" body.
+  const isPublic = lobby.is_public !== false;
+  let canViewFull = isPublic;
+  if (!isPublic) {
+    const viewerId = await getAuthUserId(req);
+    if (viewerId) {
+      const [{ data: claimed }, { data: admin }] = await Promise.all([
+        supabaseAdmin
+          .from("scout_lobby_players")
+          .select("id")
+          .eq("lobby_slug", slug)
+          .eq("claimed_by_profile_id", viewerId)
+          .maybeSingle(),
+        supabaseAdmin
+          .from("scout_lobby_admins")
+          .select("profile_id")
+          .eq("lobby_slug", slug)
+          .eq("profile_id", viewerId)
+          .maybeSingle(),
+      ]);
+      canViewFull =
+        !!claimed || !!admin || viewerId === lobby.owner_user_id;
+    }
+  }
+
+  if (!canViewFull) {
+    // Locked stub — hero only, no sensitive content, no refresh clock.
+    return Response.json({
+      slug: lobby.slug,
+      name: lobby.name,
+      isPublic: false,
+      locked: true,
+      createdAt: lobby.created_at,
+      lastActiveAt: lobby.last_active_at,
+      lastRefreshAt: null,
+      ownerUserId: lobby.owner_user_id ?? null,
+      heroChampion: lobby.hero_champion ?? null,
+      enabledTabs: [],
+      verifyMode:
+        ((lobby as any).verify_mode as
+          | "disabled" | "claim_only" | "full" | null) ?? "full",
+      players: [],
+      admins: [],
+    });
+  }
 
   const { data: players, error: playersErr } = await supabaseAdmin
     .from("scout_lobby_players")
@@ -3983,7 +4070,8 @@ export async function readScoutLobbyHandler(
   return Response.json({
     slug: lobby.slug,
     name: lobby.name,
-    isPublic: lobby.is_public,
+    isPublic: lobby.is_public !== false,
+    locked: false,
     createdAt: lobby.created_at,
     lastActiveAt: lobby.last_active_at,
     lastRefreshAt: lobby.last_refresh_at ?? null,

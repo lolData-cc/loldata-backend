@@ -111,15 +111,11 @@ export async function postScoutChatHandler(
   if (!content) return errorJson(400, "content required");
   if (content.length > 800) return errorJson(400, "content too long");
 
-  // Fetch lobby's verify_mode to decide gating policy.
-  const { data: lobby } = await supabaseAdmin
-    .from("scout_lobbies")
-    .select("verify_mode")
-    .eq("slug", slug)
-    .maybeSingle();
-  if (!lobby) return errorJson(404, "lobby not found");
-
-  // Look up the user's claimed lobby_player (if any) in this lobby.
+  // Posting to the lobby chat requires a CLAIMED (certified) identity
+  // in this lobby — always. No anonymous messages: every message is
+  // attributable to a claimed lobby member. (The previous
+  // verify_mode='disabled' bypass that allowed signed-in non-members
+  // to post as "Anonymous" is removed.)
   const { data: claimedPlayer } = await supabaseAdmin
     .from("scout_lobby_players")
     .select("id, display_name, color")
@@ -127,21 +123,16 @@ export async function postScoutChatHandler(
     .eq("claimed_by_profile_id", userId)
     .maybeSingle();
 
-  // Permission policy:
-  //   • verify_mode='disabled' → anyone with a session can post; if
-  //     they happen to be claimed in the lobby we'll use that as the
-  //     identity, otherwise we fall back to "Anonymous".
-  //   • verify_mode in (claim_only, full) → must be claimed.
-  if (lobby.verify_mode !== "disabled" && !claimedPlayer) {
+  if (!claimedPlayer) {
     return errorJson(
       403,
       "you must claim an identity in this lobby to post"
     );
   }
 
-  const displayName = claimedPlayer?.display_name ?? "Anonymous";
-  const color = claimedPlayer?.color ?? null;
-  const lobbyPlayerId = claimedPlayer?.id ?? null;
+  const displayName = claimedPlayer.display_name;
+  const color = claimedPlayer.color ?? null;
+  const lobbyPlayerId = claimedPlayer.id;
 
   const { data: inserted, error: insErr } = await supabaseAdmin
     .from("scout_lobby_messages")
