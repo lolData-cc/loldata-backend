@@ -45,6 +45,7 @@ import {
 } from "./routes/scoutChat";
 import {
   setRealtimeServer,
+  initRealtimeFanout,
   chatTopic,
   type ScoutWsData,
 } from "./realtime/scoutRealtime";
@@ -826,3 +827,6 @@ if (pathname === "/api/webhooks/stripe" && req.method === "POST") {
 // Hand the live server to the realtime hub so the chat POST handler can
 // broadcast inserted messages to subscribed sockets.
 setRealtimeServer(server);
+// Join the cross-instance fan-out channel (opt-in via SCOUT_WS_FANOUT=1)
+// so chat/bounty broadcasts reach sockets held by other Railway replicas.
+initRealtimeFanout();

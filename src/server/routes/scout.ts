@@ -819,6 +819,32 @@ function startOfBucket(ts: number, period: string): number {
   return day.getTime();
 }
 
+// ─── Paginated read helper ──────────────────────────────────────────
+// Supabase caps a single select at 1000 rows by default. For lobby
+// analytics that scan `participants` for many accounts × hundreds of
+// games, that silently truncates the result (a big lobby loses data
+// past row 1000). Pass a builder that applies `.range(from, to)` to your
+// query; this loops 1000-row pages until a short page comes back.
+async function fetchAllPaged<T>(
+  build: (
+    from: number,
+    to: number
+  ) => PromiseLike<{ data: T[] | null; error: unknown }>
+): Promise<T[]> {
+  const PAGE = 1000;
+  const MAX_PAGES = 50; // 50k-row safety ceiling
+  const out: T[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE;
+    const { data, error } = await build(from, from + PAGE - 1);
+    if (error) throw error;
+    const rows = data ?? [];
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+  }
+  return out;
+}
+
 export async function readScoutStatsHandler(
   req: Request,
   pathname: string
@@ -848,16 +874,20 @@ export async function readScoutStatsHandler(
       : startOfBucket(Date.now() - (spec.count - 1) * spec.ms, period);
   const startIso = new Date(startTs).toISOString();
 
-  // Fetch participants in window
-  const { data: rows, error: rowsErr } = await supabaseAdmin
-    .from("participants")
-    .select(
-      "puuid, match_id, win, kills, deaths, assists, matches!inner(game_creation)"
-    )
-    .in("puuid", allPuuids)
-    .gte("matches.game_creation", startIso);
-
-  if (rowsErr) {
+  // Fetch participants in window (paginated past the 1000-row cap).
+  let rows: any[];
+  try {
+    rows = await fetchAllPaged<any>((from, to) =>
+      supabaseAdmin
+        .from("participants")
+        .select(
+          "puuid, match_id, win, kills, deaths, assists, matches!inner(game_creation)"
+        )
+        .in("puuid", allPuuids)
+        .gte("matches.game_creation", startIso)
+        .range(from, to)
+    );
+  } catch (rowsErr) {
     console.error("scout stats: rows query error:", rowsErr);
     return Response.json({ error: "Failed to read stats" }, { status: 500 });
   }
@@ -1002,16 +1032,19 @@ export async function readScoutChampionsHandler(
   }
   const allPuuids = Array.from(playerByPuuid.keys());
 
-  let q = supabaseAdmin
-    .from("participants")
-    .select(
-      "puuid, match_id, champion_name, win, kills, deaths, assists, matches!inner(game_creation)"
-    )
-    .in("puuid", allPuuids);
-  if (startIso) q = q.gte("matches.game_creation", startIso);
-
-  const { data: rows, error: rowsErr } = await q;
-  if (rowsErr) {
+  let rows: any[];
+  try {
+    rows = await fetchAllPaged<any>((from, to) => {
+      let q = supabaseAdmin
+        .from("participants")
+        .select(
+          "puuid, match_id, champion_name, win, kills, deaths, assists, matches!inner(game_creation)"
+        )
+        .in("puuid", allPuuids);
+      if (startIso) q = q.gte("matches.game_creation", startIso);
+      return q.range(from, to);
+    });
+  } catch (rowsErr) {
     console.error("scout champions: query error:", rowsErr);
     return Response.json({ error: "Failed to read champions" }, { status: 500 });
   }
@@ -1223,16 +1256,17 @@ export async function readScoutHabitsHandler(
   }
   const allPuuids = Array.from(playerByPuuid.keys());
 
-  let q = supabaseAdmin
-    .from("participants")
-    .select(
-      "puuid, match_id, win, matches!inner(game_creation)"
-    )
-    .in("puuid", allPuuids);
-  if (startIso) q = q.gte("matches.game_creation", startIso);
-
-  const { data: rows, error: rowsErr } = await q;
-  if (rowsErr) {
+  let rows: any[];
+  try {
+    rows = await fetchAllPaged<any>((from, to) => {
+      let q = supabaseAdmin
+        .from("participants")
+        .select("puuid, match_id, win, matches!inner(game_creation)")
+        .in("puuid", allPuuids);
+      if (startIso) q = q.gte("matches.game_creation", startIso);
+      return q.range(from, to);
+    });
+  } catch (rowsErr) {
     console.error("scout habits: query error:", rowsErr);
     return Response.json({ error: "Failed to read habits" }, { status: 500 });
   }
@@ -1426,17 +1460,23 @@ export async function readScoutTrendingHandler(
     return Response.json({ error: "No accounts in lobby" }, { status: 404 });
   }
 
-  // One fat query — all participant rows for the lobby since creation.
-  const { data: rows, error } = await supabaseAdmin
-    .from("participants")
-    .select(
-      `puuid, match_id, champion_name, role, win,
+  // All participant rows for the lobby since creation (paginated past
+  // the 1000-row cap so big lobbies don't silently lose games).
+  let rows: any[];
+  try {
+    rows = await fetchAllPaged<any>((from, to) =>
+      supabaseAdmin
+        .from("participants")
+        .select(
+          `puuid, match_id, champion_name, role, win,
        kills, deaths, assists, gold_earned, total_damage_to_champions, vision_score,
        matches!inner(game_creation, game_duration_seconds, queue_id)`
-    )
-    .in("puuid", allPuuids)
-    .gte("matches.game_creation", sinceIso);
-  if (error) {
+        )
+        .in("puuid", allPuuids)
+        .gte("matches.game_creation", sinceIso)
+        .range(from, to)
+    );
+  } catch (error) {
     console.error("scout trending: query error:", error);
     return Response.json({ error: "Failed to query stats" }, { status: 500 });
   }
@@ -2296,15 +2336,19 @@ export async function readScoutLeaderboardHandler(
   //    Also build a per-puuid chronological match sequence we later use
   //    to compute (a) longest individual win-streak and (b) per-pair
   //    shared streaks — the data the new "Longest Streak" widget needs.
-  let q = supabaseAdmin
-    .from("participants")
-    .select(
-      "puuid, match_id, team_id, win, kills, deaths, assists, matches!inner(game_creation, queue_id)"
-    )
-    .in("puuid", allPuuids);
-  if (startIso) q = q.gte("matches.game_creation", startIso);
-  const { data: partRows, error: partErr } = await q;
-  if (partErr) {
+  let partRows: any[];
+  try {
+    partRows = await fetchAllPaged<any>((from, to) => {
+      let q = supabaseAdmin
+        .from("participants")
+        .select(
+          "puuid, match_id, team_id, win, kills, deaths, assists, matches!inner(game_creation, queue_id)"
+        )
+        .in("puuid", allPuuids);
+      if (startIso) q = q.gte("matches.game_creation", startIso);
+      return q.range(from, to);
+    });
+  } catch (partErr) {
     console.error("scout leaderboard: participants read error:", partErr);
     return Response.json({ error: "Failed to read matches" }, { status: 500 });
   }
@@ -2378,17 +2422,26 @@ export async function readScoutLeaderboardHandler(
   const balanceByPuuid = new Map<string, number>();
   const windowByPuuid = new Map<string, { first: any; last: any }>();
 
-  await Promise.all(
-    allPuuids.map(async (puuid) => {
-      // Newest snapshot overall (for current rank display + window last).
-      const { data: newestRows } = await supabaseAdmin
-        .from("scout_rank_snapshots")
-        .select("tier, rank_division, lp, wins, losses, taken_at")
-        .eq("puuid", puuid)
-        .eq("queue_type", "RANKED_SOLO_5x5")
-        .order("taken_at", { ascending: false })
-        .limit(1);
-      const newest = newestRows?.[0];
+  // Single RPC instead of 2 queries PER account: DISTINCT ON returns the
+  // newest snapshot overall (current rank + window end) and the oldest
+  // snapshot in the window (baseline) for every puuid in one round-trip.
+  // Falls back to the per-account fan-out if the function isn't deployed
+  // yet, so this is safe to ship before the migration runs.
+  let usedSnapshotRpc = false;
+  try {
+    const { data: snapRows, error: snapErr } = await supabaseAdmin.rpc(
+      "scout_leaderboard_snapshots",
+      { p_puuids: allPuuids, p_since: startIso ?? null }
+    );
+    if (snapErr) throw snapErr;
+    const newestByPuuid = new Map<string, any>();
+    const oldestByPuuid = new Map<string, any>();
+    for (const r of (snapRows ?? []) as any[]) {
+      if (r.kind === "newest") newestByPuuid.set(r.puuid, r);
+      else if (r.kind === "oldest") oldestByPuuid.set(r.puuid, r);
+    }
+    for (const puuid of allPuuids) {
+      const newest = newestByPuuid.get(puuid);
       if (newest) {
         currentRankByPuuid.set(puuid, {
           tier: newest.tier,
@@ -2398,24 +2451,59 @@ export async function readScoutLeaderboardHandler(
           losses: Number(newest.losses ?? 0),
         });
       }
-
-      // Oldest snapshot in window — the leaderboard "baseline".
-      let oldestQ = supabaseAdmin
-        .from("scout_rank_snapshots")
-        .select("tier, rank_division, lp, taken_at")
-        .eq("puuid", puuid)
-        .eq("queue_type", "RANKED_SOLO_5x5")
-        .order("taken_at", { ascending: true })
-        .limit(1);
-      if (startIso) oldestQ = oldestQ.gte("taken_at", startIso);
-      const { data: oldestRows } = await oldestQ;
-      const oldest = oldestRows?.[0];
-
+      const oldest = oldestByPuuid.get(puuid);
       if (oldest && newest) {
         windowByPuuid.set(puuid, { first: oldest, last: newest });
       }
-    })
-  );
+    }
+    usedSnapshotRpc = true;
+  } catch (rpcErr) {
+    console.warn(
+      "scout leaderboard: snapshot RPC unavailable, falling back to per-account reads:",
+      (rpcErr as any)?.message ?? rpcErr
+    );
+  }
+
+  if (!usedSnapshotRpc) {
+    await Promise.all(
+      allPuuids.map(async (puuid) => {
+        // Newest snapshot overall (for current rank display + window last).
+        const { data: newestRows } = await supabaseAdmin
+          .from("scout_rank_snapshots")
+          .select("tier, rank_division, lp, wins, losses, taken_at")
+          .eq("puuid", puuid)
+          .eq("queue_type", "RANKED_SOLO_5x5")
+          .order("taken_at", { ascending: false })
+          .limit(1);
+        const newest = newestRows?.[0];
+        if (newest) {
+          currentRankByPuuid.set(puuid, {
+            tier: newest.tier,
+            rankDivision: newest.rank_division ?? null,
+            lp: Number(newest.lp ?? 0),
+            wins: Number(newest.wins ?? 0),
+            losses: Number(newest.losses ?? 0),
+          });
+        }
+
+        // Oldest snapshot in window — the leaderboard "baseline".
+        let oldestQ = supabaseAdmin
+          .from("scout_rank_snapshots")
+          .select("tier, rank_division, lp, taken_at")
+          .eq("puuid", puuid)
+          .eq("queue_type", "RANKED_SOLO_5x5")
+          .order("taken_at", { ascending: true })
+          .limit(1);
+        if (startIso) oldestQ = oldestQ.gte("taken_at", startIso);
+        const { data: oldestRows } = await oldestQ;
+        const oldest = oldestRows?.[0];
+
+        if (oldest && newest) {
+          windowByPuuid.set(puuid, { first: oldest, last: newest });
+        }
+      })
+    );
+  }
 
   {
     for (const [puuid, { first, last }] of windowByPuuid) {
@@ -4008,25 +4096,56 @@ export async function readScoutLobbyHandler(
     string,
     { tier: string; rankDivision: string | null; lp: number }
   >();
-  await Promise.all(
-    allAccountPuuids.map(async (puuid) => {
-      const { data: rows } = await supabaseAdmin
-        .from("scout_rank_snapshots")
-        .select("tier, rank_division, lp")
-        .eq("puuid", puuid)
-        .eq("queue_type", "RANKED_SOLO_5x5")
-        .order("taken_at", { ascending: false })
-        .limit(1);
-      const row = rows?.[0];
-      if (row) {
-        currentRankByPuuid.set(puuid, {
-          tier: row.tier,
-          rankDivision: row.rank_division ?? null,
-          lp: Number(row.lp ?? 0),
+  // Single RPC (newest snapshot per account, DISTINCT ON) instead of one
+  // limit(1) query per account — this is the hottest read (every lobby
+  // page load). We only need the 'newest' rows here; the RPC also returns
+  // an 'oldest' baseline we ignore. Falls back to the per-account fan-out
+  // if the function isn't deployed yet, so it's safe to ship early.
+  let usedRankRpc = false;
+  if (allAccountPuuids.length > 0) {
+    try {
+      const { data: snapRows, error: snapErr } = await supabaseAdmin.rpc(
+        "scout_leaderboard_snapshots",
+        { p_puuids: allAccountPuuids, p_since: null }
+      );
+      if (snapErr) throw snapErr;
+      for (const r of (snapRows ?? []) as any[]) {
+        if (r.kind !== "newest") continue;
+        currentRankByPuuid.set(r.puuid, {
+          tier: r.tier,
+          rankDivision: r.rank_division ?? null,
+          lp: Number(r.lp ?? 0),
         });
       }
-    })
-  );
+      usedRankRpc = true;
+    } catch (rpcErr) {
+      console.warn(
+        "scout lobby read: snapshot RPC unavailable, falling back to per-account reads:",
+        (rpcErr as any)?.message ?? rpcErr
+      );
+    }
+  }
+  if (!usedRankRpc) {
+    await Promise.all(
+      allAccountPuuids.map(async (puuid) => {
+        const { data: rows } = await supabaseAdmin
+          .from("scout_rank_snapshots")
+          .select("tier, rank_division, lp")
+          .eq("puuid", puuid)
+          .eq("queue_type", "RANKED_SOLO_5x5")
+          .order("taken_at", { ascending: false })
+          .limit(1);
+        const row = rows?.[0];
+        if (row) {
+          currentRankByPuuid.set(puuid, {
+            tier: row.tier,
+            rankDivision: row.rank_division ?? null,
+            lp: Number(row.lp ?? 0),
+          });
+        }
+      })
+    );
+  }
   const playersWithRank = playersWithIcon.map((p: any) => ({
     ...p,
     accounts: p.accounts.map((a: any) => ({
