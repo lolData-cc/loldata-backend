@@ -15,6 +15,7 @@
 
 import { supabaseAdmin } from "../supabase/client";
 import { logger } from "../logger";
+import { broadcastChatMessage } from "../realtime/scoutRealtime";
 
 const jsonHeaders = { "Content-Type": "application/json" } as const;
 const errorJson = (status: number, message: string) =>
@@ -153,18 +154,23 @@ export async function postScoutChatHandler(
     return errorJson(500, "internal error");
   }
 
-  return new Response(
-    JSON.stringify({
-      message: {
-        id: inserted.id,
-        profileId: inserted.profile_id,
-        lobbyPlayerId: inserted.lobby_player_id,
-        displayName: inserted.display_name,
-        color: inserted.color,
-        content: inserted.content,
-        createdAt: inserted.created_at,
-      },
-    }),
-    { status: 200, headers: jsonHeaders }
-  );
+  const message = {
+    id: inserted.id,
+    profileId: inserted.profile_id,
+    lobbyPlayerId: inserted.lobby_player_id,
+    displayName: inserted.display_name,
+    color: inserted.color,
+    content: inserted.content,
+    createdAt: inserted.created_at,
+  };
+
+  // Fan the message out live to every WebSocket subscribed to this
+  // lobby (every open page, whether or not they're on the Chat tab).
+  // The sender's own page also receives it and dedupes by id.
+  broadcastChatMessage(slug, message);
+
+  return new Response(JSON.stringify({ message }), {
+    status: 200,
+    headers: jsonHeaders,
+  });
 }

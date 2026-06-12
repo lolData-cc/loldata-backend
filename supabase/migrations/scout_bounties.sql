@@ -78,7 +78,7 @@ VALUES
   ('damage_60k',   'Damage Dealer',         'Deal 60,000+ damage to champions',         'damage',          60000, 'common',    'flame'),
   ('kp_70',        'True MVP',              'Achieve 70%+ kill participation',          'kp_pct',          0.70,  'rare',      'crown'),
   ('vision_50',    'Eye of the Rift',       'Reach 50+ vision score',                   'vision',          50,    'common',    'eye'),
-  ('gold_25k',     'Banker',                'Earn 25,000+ gold in a match',             'gold',            25000, 'common',    'coins'),
+  ('gold_18k',     'Banker',                'Earn 18,000+ gold in a match',             'gold',            18000, 'common',    'coins'),
   ('kda_10',       'Untouchable',           'Finish with KDA of 10.0 or higher',        'kda',             10.0,  'rare',      'shield'),
   ('zero_deaths',  'No Tax',                'Win a match without dying',                'zero_deaths_win', 0,     'rare',      'sparkles'),
   ('assists_15',   'Best Sidekick',         'Rack up 15+ assists',                      'assists',         15,    'common',    'users'),

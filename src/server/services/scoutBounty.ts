@@ -17,6 +17,7 @@
 
 import { supabaseAdmin } from "../supabase/client";
 import { logger } from "../logger";
+import { broadcastBountyEvent } from "../realtime/scoutRealtime";
 
 // ─── Types ──────────────────────────────────────────────────────────
 export type BountyTemplate = {
@@ -86,7 +87,8 @@ export type BountyParticipantSnapshot = {
 // now stores the Europe/Rome local date (YYYY-MM-DD).
 const BOUNTY_TIMEZONE = "Europe/Rome";
 
-function todayLocalDateString(): string {
+// Europe/Rome calendar date (YYYY-MM-DD) for an arbitrary instant.
+function romeDateString(date: Date): string {
   // en-CA locale formats as YYYY-MM-DD, which is exactly the shape we
   // store in day_utc.
   return new Intl.DateTimeFormat("en-CA", {
@@ -94,7 +96,11 @@ function todayLocalDateString(): string {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(new Date());
+  }).format(date);
+}
+
+function todayLocalDateString(): string {
+  return romeDateString(new Date());
 }
 
 // ─── Template pool ──────────────────────────────────────────────────
@@ -200,6 +206,24 @@ export async function ensureDailyBounty(
 async function getTemplateById(id: string): Promise<BountyTemplate | null> {
   const all = await getAllTemplates();
   return all.find((t) => t.id === id) ?? null;
+}
+
+// Short human label for the achieved value — surfaced on the live chat
+// banner. Mirrors the frontend's formatBountyAchieved.
+export function formatBountyValue(metric: BountyMetric, value: number): string {
+  switch (metric) {
+    case "kills":          return `${value} kills`;
+    case "damage":         return `${Math.round(value).toLocaleString("en-US")} dmg`;
+    case "kp_pct":         return `${Math.round(value * 100)}% KP`;
+    case "vision":         return `${value} vision`;
+    case "gold":           return `${Math.round(value).toLocaleString("en-US")} gold`;
+    case "kda":            return `${value.toFixed(2)} KDA`;
+    case "zero_deaths_win":return `flawless win`;
+    case "assists":        return `${value} assists`;
+    case "quick_win":      return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")} win`;
+    case "cs":             return `${value} CS`;
+    default:               return `${value}`;
+  }
 }
 
 // ─── Evaluate match against a bounty ────────────────────────────────
@@ -328,23 +352,241 @@ export async function checkBountyForMatch(
 
     if (!updErr && updated && updated.length > 0) {
       claimedLobbies.push(mem.lobby_slug);
-      const verb =
-        bounty.claimed_at == null ? "claimed" : "overtook";
+      const overtake = bounty.claimed_at != null;
+      const verb = overtake ? "overtook" : "claimed";
       logger.info(
         "scoutBounty",
         `${verb} [${tpl.code}] in ${mem.lobby_slug} by ${participant.puuid.slice(0, 8)} (value=${value}, prev=${bounty.claimed_value ?? "none"})`
       );
+
+      // Live chat event banner. Look up the claimer's display name +
+      // colour so the banner can render them in their accent, then
+      // broadcast to everyone watching the lobby. Best-effort: failures
+      // here must never break ingestion.
+      try {
+        const { data: lp } = await supabaseAdmin
+          .from("scout_lobby_players")
+          .select("display_name, color")
+          .eq("id", mem.lobby_player_id)
+          .maybeSingle();
+        broadcastBountyEvent(mem.lobby_slug, {
+          id: crypto.randomUUID(),
+          title: tpl.title,
+          icon: tpl.icon,
+          rarity: tpl.rarity,
+          metric: tpl.metric,
+          playerName: lp?.display_name ?? "A player",
+          color: lp?.color ?? null,
+          valueLabel: formatBountyValue(tpl.metric, value),
+          overtake,
+          createdAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        logger.error(
+          "scoutBounty",
+          `bounty banner broadcast failed: ${(err as Error)?.message}`
+        );
+      }
     }
   }
 
   return claimedLobbies;
 }
 
+// ─── Retroactive reconcile ──────────────────────────────────────────
+// The per-match bounty check (`checkBountyForMatch`) only runs ONCE, the
+// first time a match is ingested, against the threshold in effect at
+// that instant. So a match ingested under an old threshold (e.g. Banker
+// at 25k) is never re-checked after the threshold is lowered to 18k —
+// even though it now qualifies. This heals that by re-scanning today's
+// already-ingested matches and claiming the best qualifier through the
+// same atomic competitive guard.
+//
+// Limitation: it evaluates from the `participants` table, so metrics
+// whose source columns weren't populated on that ingest path (notably
+// kp_pct → kill_participation, cs → total_cs) are skipped for those
+// rows. Skipping is safe (a null field evaluates to "doesn't qualify",
+// never a false claim). All gold/kills/damage/vision/assists/kda/
+// quick_win/zero-death bounties reconcile fully.
+const reconcileThrottle = new Map<string, number>();
+const RECONCILE_THROTTLE_MS = 60 * 1000;
+
+export async function reconcileDailyBounty(
+  lobbySlug: string,
+  bounty: BountyDaily,
+  template: BountyTemplate
+): Promise<boolean> {
+  // Only heal UNCLAIMED bounties — once held, the live per-match check
+  // keeps it competitive going forward.
+  if (bounty.claimed_at != null) return false;
+
+  const last = reconcileThrottle.get(lobbySlug) ?? 0;
+  if (Date.now() - last < RECONCILE_THROTTLE_MS) return false;
+  reconcileThrottle.set(lobbySlug, Date.now());
+
+  // 1. lobby account puuids → lobby_player_id
+  const { data: accs } = await supabaseAdmin
+    .from("scout_lobby_accounts")
+    .select("puuid, lobby_player_id, scout_lobby_players!inner ( lobby_slug )")
+    .eq("scout_lobby_players.lobby_slug", lobbySlug);
+  if (!accs || accs.length === 0) return false;
+
+  const playerByPuuid = new Map<string, string>();
+  for (const a of accs as any[]) {
+    if (a.puuid && a.lobby_player_id) {
+      playerByPuuid.set(a.puuid, a.lobby_player_id);
+    }
+  }
+  const puuids = [...playerByPuuid.keys()];
+  if (puuids.length === 0) return false;
+
+  // 2. today's ingested matches for these accounts. Pull a generous 36h
+  //    window, then filter precisely to the bounty's Rome day.
+  const sinceIso = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
+  const { data: rows } = await supabaseAdmin
+    .from("participants")
+    .select(
+      "puuid, match_id, kills, deaths, assists, gold_earned, total_damage_to_champions, vision_score, kill_participation, total_cs, total_minions_killed, neutral_minions_killed, win, matches!inner ( game_creation, game_duration_seconds )"
+    )
+    .in("puuid", puuids)
+    .gte("matches.game_creation", sinceIso);
+  if (!rows || rows.length === 0) return false;
+
+  // 3. evaluate every match played on the bounty's day, keep the best.
+  const lowerIsBetter = template.metric === "quick_win";
+  let best: {
+    puuid: string;
+    lobby_player_id: string;
+    match_id: string;
+    value: number;
+  } | null = null;
+
+  for (const r of rows as any[]) {
+    const gc = r.matches?.game_creation;
+    if (!gc) continue;
+    if (romeDateString(new Date(gc)) !== bounty.day_utc) continue;
+
+    const cs =
+      r.total_cs ??
+      ((r.total_minions_killed ?? 0) + (r.neutral_minions_killed ?? 0));
+    const kp = r.kill_participation ?? 0;
+    const teamKills = kp > 0 ? (r.kills + r.assists) / kp : 0;
+
+    const snap: BountyParticipantSnapshot = {
+      puuid: r.puuid,
+      kills: r.kills ?? 0,
+      deaths: r.deaths ?? 0,
+      assists: r.assists ?? 0,
+      total_damage_to_champions: r.total_damage_to_champions ?? 0,
+      vision_score: r.vision_score ?? 0,
+      gold_earned: r.gold_earned ?? 0,
+      cs,
+      win: !!r.win,
+      team_kills: teamKills,
+      game_duration_seconds: r.matches?.game_duration_seconds ?? 0,
+      match_id: r.match_id,
+    };
+
+    const value = evaluateMetric(template.metric, template.threshold, snap);
+    if (value == null) continue;
+    const lpId = playerByPuuid.get(r.puuid);
+    if (!lpId) continue;
+
+    if (
+      best == null ||
+      (lowerIsBetter ? value < best.value : value > best.value)
+    ) {
+      best = {
+        puuid: r.puuid,
+        lobby_player_id: lpId,
+        match_id: r.match_id,
+        value,
+      };
+    }
+  }
+
+  if (!best) return false;
+
+  // 4. atomic competitive claim — identical guard to the live path.
+  const cmp = lowerIsBetter ? "gt" : "lt";
+  const orFilter = `claimed_at.is.null,claimed_value.${cmp}.${best.value}`;
+  const { data: updated } = await supabaseAdmin
+    .from("scout_bounty_daily")
+    .update({
+      claimed_at: new Date().toISOString(),
+      claimed_by_lobby_player_id: best.lobby_player_id,
+      claimed_by_account_puuid: best.puuid,
+      claimed_match_id: best.match_id,
+      claimed_value: best.value,
+    })
+    .eq("id", bounty.id)
+    .or(orFilter)
+    .select("id");
+
+  if (updated && updated.length > 0) {
+    logger.info(
+      "scoutBounty",
+      `reconciled [${template.code}] in ${lobbySlug} → ${best.puuid.slice(0, 8)} (value=${best.value})`
+    );
+
+    // Announce the (retroactive) claim in chat, same as the live path.
+    try {
+      const { data: lp } = await supabaseAdmin
+        .from("scout_lobby_players")
+        .select("display_name, color")
+        .eq("id", best.lobby_player_id)
+        .maybeSingle();
+      broadcastBountyEvent(lobbySlug, {
+        id: crypto.randomUUID(),
+        title: template.title,
+        icon: template.icon,
+        rarity: template.rarity,
+        metric: template.metric,
+        playerName: lp?.display_name ?? "A player",
+        color: lp?.color ?? null,
+        valueLabel: formatBountyValue(template.metric, best.value),
+        overtake: false,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      logger.error(
+        "scoutBounty",
+        `reconcile banner broadcast failed: ${(err as Error)?.message}`
+      );
+    }
+
+    return true;
+  }
+  return false;
+}
+
 // ─── Read API: today's bounty (full payload for the UI) ─────────────
 export async function readTodayBountyPayload(lobbySlug: string) {
   const result = await ensureDailyBounty(lobbySlug);
   if (!result) return null;
-  const { bounty, template } = result;
+  let { bounty } = result;
+  const { template } = result;
+
+  // Heal missed claims (e.g. a match ingested before the threshold was
+  // lowered) before building the payload.
+  if (bounty.claimed_at == null) {
+    try {
+      const changed = await reconcileDailyBounty(lobbySlug, bounty, template);
+      if (changed) {
+        const { data: refreshed } = await supabaseAdmin
+          .from("scout_bounty_daily")
+          .select("*")
+          .eq("id", bounty.id)
+          .maybeSingle();
+        if (refreshed) bounty = refreshed as BountyDaily;
+      }
+    } catch (err) {
+      logger.error(
+        "scoutBounty",
+        `reconcile failed: ${(err as Error)?.message}`
+      );
+    }
+  }
 
   // If claimed, enrich with the claimer's display name + colour.
   let claimedBy: {

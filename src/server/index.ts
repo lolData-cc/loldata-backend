@@ -24,7 +24,7 @@ import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
 import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
 import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler, debugScoutSnapshotsHandler } from "./routes/scout";
-import { readScoutBountyTodayHandler, readScoutBountyLeaderboardHandler } from "./routes/scoutBountyRoutes";
+import { readScoutBountyTodayHandler, readScoutBountyLeaderboardHandler, previewScoutBountyHandler } from "./routes/scoutBountyRoutes";
 import {
   createOrReadClaimInviteHandler,
   deleteClaimInviteHandler,
@@ -43,6 +43,11 @@ import {
   readScoutChatHandler,
   postScoutChatHandler,
 } from "./routes/scoutChat";
+import {
+  setRealtimeServer,
+  chatTopic,
+  type ScoutWsData,
+} from "./realtime/scoutRealtime";
 import {
   readMatchSocialBatchHandler,
   toggleLikeHandler,
@@ -346,15 +351,34 @@ async function withLogAndCors(
   return withCors(res);
 }
 
-serve({
+const server = serve({
   port: PORT,
   idleTimeout: 120,
-  async fetch(req) {
+  async fetch(req, server) {
     const started = Date.now();
     const url = new URL(req.url, `http://${req.headers.get("host")}`);
     const pathname = url.pathname;
 
     logger.request(req, pathname);
+
+    // ── WebSocket upgrade — live scout lobby chat ───────────────────
+    // Path: /api/scout/lobby/:slug/ws. Must run before the OPTIONS and
+    // API route table: when the upgrade succeeds Bun owns the response
+    // (we return undefined) and routes the socket to the `websocket`
+    // handler below. The slug is stashed on the socket so `open` can
+    // subscribe it to this lobby's broadcast topic.
+    {
+      const wsMatch = pathname.match(
+        /^\/api\/scout\/lobby\/([^/]+)\/ws$/
+      );
+      if (wsMatch) {
+        const upgraded = server.upgrade(req, {
+          data: { slug: wsMatch[1] } satisfies ScoutWsData,
+        });
+        if (upgraded) return undefined;
+        return new Response("websocket upgrade failed", { status: 426 });
+      }
+    }
 
     // CORS preflight
     if (req.method === "OPTIONS") {
@@ -512,6 +536,10 @@ if (pathname.startsWith("/api/scout/leaderboard/") && req.method === "GET") {
 
 if (pathname.startsWith("/api/scout/bounty/today/") && req.method === "GET") {
   return withLogAndCors(req, pathname, (r) => readScoutBountyTodayHandler(r, pathname));
+}
+
+if (pathname.startsWith("/api/scout/bounty/preview/") && req.method === "POST") {
+  return withLogAndCors(req, pathname, (r) => previewScoutBountyHandler(r, pathname));
 }
 
 if (pathname.startsWith("/api/scout/bounty/leaderboard/") && req.method === "GET") {
@@ -768,4 +796,33 @@ if (pathname === "/api/webhooks/stripe" && req.method === "POST") {
       }
     }
   },
+
+  // ── WebSocket handler — live scout lobby chat ─────────────────────
+  // Sockets are upgraded in `fetch` above with { data: { slug } }. On
+  // open we subscribe the socket to this lobby's topic; the HTTP chat
+  // POST handler then `server.publish()`-es new messages to it. Clients
+  // are receive-only (they POST via REST), so inbound frames are
+  // ignored beyond a lightweight ping/pong keepalive.
+  websocket: {
+    open(ws) {
+      const { slug } = ws.data as ScoutWsData;
+      ws.subscribe(chatTopic(slug));
+    },
+    message(ws, raw) {
+      // Keepalive only. The client may send "ping"; reply "pong".
+      if (typeof raw === "string" && raw === "ping") ws.send("pong");
+    },
+    close(ws) {
+      const { slug } = ws.data as ScoutWsData;
+      try {
+        ws.unsubscribe(chatTopic(slug));
+      } catch {
+        /* already gone */
+      }
+    },
+  },
 })
+
+// Hand the live server to the realtime hub so the chat POST handler can
+// broadcast inserted messages to subscribed sockets.
+setRealtimeServer(server);

@@ -2735,6 +2735,9 @@ type FeedItem = {
     goldEarned: number;
     totalDamageToChampions: number;
     visionScore: number;
+    // Total creep score (lane minions + neutral/jungle monsters). Used by
+    // the MatchCard CS mini-caption with per-minute colour tiers.
+    cs: number;
     items: number[];
     perkPrimaryStyle: number | null;
     perkSubStyle: number | null;
@@ -3142,6 +3145,8 @@ export async function readScoutFeedHandler(
           goldEarned: me.goldEarned ?? 0,
           totalDamageToChampions: me.totalDamageDealtToChampions ?? 0,
           visionScore: me.visionScore ?? 0,
+          cs:
+            (me.totalMinionsKilled ?? 0) + (me.neutralMinionsKilled ?? 0),
           items: [
             me.item0,
             me.item1,
