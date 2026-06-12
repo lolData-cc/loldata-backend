@@ -1,0 +1,28 @@
+# Posts a deploy changelog to the private Discord channel on every push to
+# master. Content = the feature bullets from the pushed commit messages
+# (see .github/scripts/announce-deploy.mjs).
+#
+# Setup (one-time): add a repo/org secret DISCORD_DEPLOY_WEBHOOK with the
+# channel's Discord webhook URL.
+name: Announce deploy to Discord
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Post changelog to Discord
+        env:
+          DISCORD_DEPLOY_WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+          REPO_LABEL: Backend
+        run: node .github/scripts/announce-deploy.mjs
