@@ -124,18 +124,30 @@ async function getAllTemplates(): Promise<BountyTemplate[]> {
   return templateCache;
 }
 
-// Rarity weights: 60/30/10 split.
-function pickRandomTemplate(pool: BountyTemplate[]): BountyTemplate | null {
+// Rarity weights: 60/30/10 split. `excludeIds` skips templates used on the
+// most recent days for this lobby so the daily bounty visibly changes
+// instead of re-rolling the same challenge (e.g. "Banker" two days running).
+function pickRandomTemplate(
+  pool: BountyTemplate[],
+  excludeIds?: Set<string>
+): BountyTemplate | null {
   if (pool.length === 0) return null;
+  // Drop recently-used templates; fall back to the full pool if excluding
+  // would leave nothing (small pool / every template used recently).
+  let candidates =
+    excludeIds && excludeIds.size > 0
+      ? pool.filter((t) => !excludeIds.has(t.id))
+      : pool;
+  if (candidates.length === 0) candidates = pool;
   const weight = (r: BountyTemplate["rarity"]) =>
     r === "common" ? 6 : r === "rare" ? 3 : 1;
-  const totalWeight = pool.reduce((sum, t) => sum + weight(t.rarity), 0);
+  const totalWeight = candidates.reduce((sum, t) => sum + weight(t.rarity), 0);
   let pick = Math.random() * totalWeight;
-  for (const t of pool) {
+  for (const t of candidates) {
     pick -= weight(t.rarity);
     if (pick <= 0) return t;
   }
-  return pool[pool.length - 1];
+  return candidates[candidates.length - 1];
 }
 
 // ─── Ensure today's bounty exists ───────────────────────────────────
@@ -160,9 +172,19 @@ export async function ensureDailyBounty(
     return { bounty: existing as BountyDaily, template: tpl };
   }
 
-  // Need to mint. Pick a random template weighted by rarity.
+  // Need to mint. Pick a random template weighted by rarity, excluding the
+  // ones used on this lobby's most recent days so it doesn't repeat.
   const templates = await getAllTemplates();
-  const template = pickRandomTemplate(templates);
+  const { data: recentRows } = await supabaseAdmin
+    .from("scout_bounty_daily")
+    .select("template_id")
+    .eq("lobby_slug", lobbySlug)
+    .order("day_utc", { ascending: false })
+    .limit(3);
+  const recentIds = new Set(
+    (recentRows ?? []).map((r) => r.template_id as string)
+  );
+  const template = pickRandomTemplate(templates, recentIds);
   if (!template) {
     logger.error("scoutBounty", "no templates available to mint bounty");
     return null;

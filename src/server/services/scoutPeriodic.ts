@@ -21,6 +21,7 @@
 
 import { supabaseAdmin } from "../supabase/client";
 import { writeRankSnapshot } from "./rankSnapshot";
+import { ensureDailyBounty } from "./scoutBounty";
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;     // 5 min cadence
 const PER_CALL_DELAY_MS = 250;                // ~4 calls/sec safety pace
@@ -69,6 +70,40 @@ async function sweepOnce(): Promise<void> {
     if (PER_CALL_DELAY_MS > 0) {
       await new Promise((r) => setTimeout(r, PER_CALL_DELAY_MS));
     }
+  }
+
+  // Roll today's daily bounty for every recently-active lobby. The /today
+  // read is otherwise the ONLY thing that mints a bounty, so a lobby nobody
+  // opens right at local midnight would stay frozen on yesterday's. Cheap +
+  // idempotent: a fast-path SELECT on the days the row already exists.
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const { data: lobbies } = await supabaseAdmin
+      .from("scout_lobbies")
+      .select("slug, last_active_at")
+      .gte("last_active_at", sevenDaysAgo);
+    let bountyOk = 0;
+    for (const l of (lobbies ?? []) as Array<{ slug: string }>) {
+      try {
+        await ensureDailyBounty(l.slug);
+        bountyOk++;
+      } catch (e) {
+        console.warn(
+          `[scout-periodic] bounty ensure failed for ${l.slug}:`,
+          (e as any)?.message ?? e
+        );
+      }
+    }
+    if (lobbies && lobbies.length > 0) {
+      console.log(
+        `[scout-periodic] bounties ensured: ${bountyOk}/${lobbies.length} active lobbies`
+      );
+    }
+  } catch (e) {
+    console.warn(
+      "[scout-periodic] bounty ensure sweep failed:",
+      (e as any)?.message ?? e
+    );
   }
 
   const elapsedMs = Date.now() - startedAt;
