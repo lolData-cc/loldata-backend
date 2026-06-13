@@ -293,6 +293,7 @@ async function ingestSingleMatch(
       win: !!me.win,
       team_kills: teamKills,
       game_duration_seconds: durationSec,
+      queue_id: match.info?.queueId ?? 0,
       match_id: matchId,
     });
   } catch (err: any) {

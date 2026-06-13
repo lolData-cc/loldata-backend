@@ -73,6 +73,8 @@ export type BountyParticipantSnapshot = {
   team_kills: number;
   /** Match duration in seconds — used by `quick_win`. */
   game_duration_seconds: number;
+  /** Riot queue id — bounties only count ranked (420 Solo/Duo, 440 Flex). */
+  queue_id: number;
   match_id: string;
 };
 
@@ -257,12 +259,18 @@ export function formatBountyValue(metric: BountyMetric, value: number): string {
 // remake/abnormal game — exclude it from EVERY bounty. (0 = duration
 // unknown → don't filter, so we never silently drop a real claim.)
 const REMAKE_MAX_DURATION_S = 300;
+// Bounties only count ranked queues — Solo/Duo (420) and Flex (440). A
+// flawless/fast win in a bot game, normal or ARAM must not claim a bounty.
+const RANKED_QUEUE_IDS = new Set([420, 440]);
 
 function evaluateMetric(
   metric: BountyMetric,
   threshold: number,
   p: BountyParticipantSnapshot
 ): number | null {
+  if (!RANKED_QUEUE_IDS.has(p.queue_id)) {
+    return null;
+  }
   if (
     p.game_duration_seconds > 0 &&
     p.game_duration_seconds < REMAKE_MAX_DURATION_S
@@ -481,7 +489,7 @@ export async function reconcileDailyBounty(
   const { data: rows } = await supabaseAdmin
     .from("participants")
     .select(
-      "puuid, match_id, kills, deaths, assists, gold_earned, total_damage_to_champions, vision_score, kill_participation, total_cs, total_minions_killed, neutral_minions_killed, win, matches!inner ( game_creation, game_duration_seconds )"
+      "puuid, match_id, kills, deaths, assists, gold_earned, total_damage_to_champions, vision_score, kill_participation, total_cs, total_minions_killed, neutral_minions_killed, win, matches!inner ( game_creation, game_duration_seconds, queue_id )"
     )
     .in("puuid", puuids)
     .gte("matches.game_creation", sinceIso);
@@ -519,6 +527,7 @@ export async function reconcileDailyBounty(
       win: !!r.win,
       team_kills: teamKills,
       game_duration_seconds: r.matches?.game_duration_seconds ?? 0,
+      queue_id: r.matches?.queue_id ?? 0,
       match_id: r.match_id,
     };
 
