@@ -251,11 +251,24 @@ export function formatBountyValue(metric: BountyMetric, value: number): string {
 // ─── Evaluate match against a bounty ────────────────────────────────
 /** Returns the numeric "claimed_value" if the participant satisfies
  *  the bounty's metric/threshold, or null otherwise. */
+// A remake (early-surrender, ~3 min) is a trivial flawless + fast win, so
+// it would falsely claim "No Tax" (zero-death win) and "Speedrun" (quick
+// win). Real games run 15+ min, so any populated sub-5-min duration is a
+// remake/abnormal game — exclude it from EVERY bounty. (0 = duration
+// unknown → don't filter, so we never silently drop a real claim.)
+const REMAKE_MAX_DURATION_S = 300;
+
 function evaluateMetric(
   metric: BountyMetric,
   threshold: number,
   p: BountyParticipantSnapshot
 ): number | null {
+  if (
+    p.game_duration_seconds > 0 &&
+    p.game_duration_seconds < REMAKE_MAX_DURATION_S
+  ) {
+    return null;
+  }
   switch (metric) {
     case "kills":
       return p.kills >= threshold ? p.kills : null;
