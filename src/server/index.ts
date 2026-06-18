@@ -7,6 +7,7 @@ import { Buffer } from "buffer";
 import { logger } from "./logger";
 import { checkProHandler } from "./routes/checkPro"
 import { getMatchesHandler } from "./routes/getMatches"
+import { explorerQueryHandler } from "./explorer/query"
 import { getMatchAnalysisHandler } from "./routes/getMatchAnalysis"
 import { getSummonerHandler } from "./routes/getSummoner"
 import { matchupsHandler } from "./routes/aihelp/matchups"
@@ -119,8 +120,14 @@ function withCors(res: Response): Response {
 const PORT = Number(process.env.PORT) || 3001;
 logger.info("SERVER_START", `Server Bun in ascolto sulla porta ${PORT}`);
 
-// Preload champion snapshots into memory for instant responses
+// Preload champion snapshots into memory for instant responses.
+// Re-run periodically so a fresh rebuild-snapshots (e.g. from the INGESTOR)
+// is picked up without a backend restart — the cache is swapped atomically.
 preloadSnapshots();
+const SNAP_RELOAD_MS = Number(process.env.SNAP_RELOAD_MS ?? "900000"); // 15 min
+setInterval(() => {
+  preloadSnapshots().catch((e) => console.error("snapshot reload failed:", e));
+}, SNAP_RELOAD_MS);
 
 // Start the periodic scout rank-snapshot sweep so LP gets tracked even
 // when nobody is looking at any lobby.
@@ -397,6 +404,10 @@ const server = serve({
     // === ROUTE API ===
 if (pathname === "/api/matches" && req.method === "POST") {
   return withLogAndCors(req, pathname, getMatchesHandler);
+}
+
+if (pathname === "/api/explorer/query" && req.method === "POST") {
+  return withLogAndCors(req, pathname, explorerQueryHandler);
 }
 
 if (pathname === "/api/match/analysis" && req.method === "POST") {
@@ -726,6 +737,16 @@ if (pathname === "/api/champion/stats" && req.method === "POST") {
 
 if (pathname === "/api/champion/patches" && req.method === "GET") {
   return withLogAndCors(req, pathname, getAvailablePatchesHandler);
+}
+
+// Force-refresh the in-memory snapshot cache. The INGESTOR can hit this right
+// after a rebuild-snapshots so fresh numbers show without a backend restart.
+if (pathname === "/api/admin/reload-snapshots" && req.method === "POST") {
+  return withLogAndCors(req, pathname, async () => {
+    const t0 = Date.now();
+    await preloadSnapshots();
+    return Response.json({ reloaded: true, ms: Date.now() - t0 });
+  });
 }
 
 if (pathname === "/api/champion/otp-ranking" && req.method === "POST") {

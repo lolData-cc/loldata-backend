@@ -64,13 +64,21 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
   // lobby members who had never been opened via the summoner page
   // (= never upserted into `users`) were invisible to the autocomplete
   // even though the rest of the app already knew about them.
-  const [usersStartsRes, scoutStartsRes] = await Promise.all([
+  const [usersStartsRes, playersStartsRes, scoutStartsRes] = await Promise.all([
     supabaseAdmin
       .from("users")
       .select("name, tag, icon_id, rank, region")
       .ilike("name", `${searchName}%`)
       .order("last_searched_at", { ascending: false })
       .limit(5),
+    // `players` — the ladder-crawled index (every ranked apex player),
+    // so search isn't limited to profiles someone happened to open.
+    supabaseAdmin
+      .from("players")
+      .select("game_name, tag_line, icon_id, tier, platform")
+      .ilike("game_name", `${searchName}%`)
+      .order("lp", { ascending: false, nullsFirst: false })
+      .limit(8),
     supabaseAdmin
       .from("scout_lobby_accounts")
       .select("riot_name, riot_tag, region")
@@ -86,6 +94,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
 
   const results: Suggestion[] = mergeUnique(
     usersStartsRes.data ?? [],
+    (playersStartsRes.data ?? []).map(playerRowToSuggestion),
     (scoutStartsRes.data ?? []).map(scoutRowToSuggestion)
   )
 
@@ -93,13 +102,19 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
   // came back empty AND the query is long enough that a full-table
   // scan isn't catastrophic. Searches the same two tables in parallel.
   if (results.length === 0 && searchName.length >= 4) {
-    const [usersContainsRes, scoutContainsRes] = await Promise.all([
+    const [usersContainsRes, playersContainsRes, scoutContainsRes] = await Promise.all([
       supabaseAdmin
         .from("users")
         .select("name, tag, icon_id, rank, region")
         .ilike("name", `%${searchName}%`)
         .order("last_searched_at", { ascending: false })
         .limit(5),
+      supabaseAdmin
+        .from("players")
+        .select("game_name, tag_line, icon_id, tier, platform")
+        .ilike("game_name", `%${searchName}%`)
+        .order("lp", { ascending: false, nullsFirst: false })
+        .limit(8),
       supabaseAdmin
         .from("scout_lobby_accounts")
         .select("riot_name, riot_tag, region")
@@ -109,6 +124,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
     ])
     const merged = mergeUnique(
       usersContainsRes.data ?? [],
+      (playersContainsRes.data ?? []).map(playerRowToSuggestion),
       (scoutContainsRes.data ?? []).map(scoutRowToSuggestion)
     )
     for (const row of merged) results.push(row)
@@ -170,15 +186,36 @@ function scoutRowToSuggestion(row: any): Suggestion {
   }
 }
 
+function playerRowToSuggestion(row: any): Suggestion {
+  return {
+    name: row.game_name,
+    tag: row.tag_line,
+    icon_id: row.icon_id ?? null,
+    rank: row.tier ?? null,
+    region: platformToRegion(row.platform),
+  }
+}
+
+// players.platform ("EUW1") → the display region the summoner page expects
+// ("EUW"). Special-cases the few whose display name isn't host-minus-"1".
+const PLATFORM_DISPLAY: Record<string, string> = {
+  EUW1: "EUW", EUN1: "EUNE", NA1: "NA", BR1: "BR", LA1: "LAN", LA2: "LAS",
+  OC1: "OCE", TR1: "TR", RU: "RU", KR: "KR", JP1: "JP",
+}
+function platformToRegion(platform: string | null): string {
+  if (!platform) return "EUW"
+  return PLATFORM_DISPLAY[platform] ?? platform.replace(/1$/, "")
+}
+
 /**
  * Concatenate two suggestion lists in order, dropping any duplicates by
  * lowercase `name#tag`. The first list wins (= `users` is preferred over
  * scout lobby rows because it carries the rich fields).
  */
-function mergeUnique(a: Suggestion[], b: Suggestion[]): Suggestion[] {
+function mergeUnique(...lists: Suggestion[][]): Suggestion[] {
   const seen = new Set<string>()
   const out: Suggestion[] = []
-  for (const list of [a, b]) {
+  for (const list of lists) {
     for (const row of list) {
       const key = `${row.name}#${row.tag}`.toLowerCase()
       if (seen.has(key)) continue

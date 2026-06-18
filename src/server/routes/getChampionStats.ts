@@ -25,8 +25,10 @@ function cacheSet(key: string, value: unknown) {
 }
 
 // ── Snapshot preload cache ──────────────────────────────────
-// Key: "champId:role:tier" → snapshot data
-const _snapCache = new Map<string, any>();
+// Key: "champId:role:tier" → snapshot data. Rebuilt into a fresh map on each
+// (re)load and swapped in atomically, so a reload never serves a half-empty
+// cache. `let` (not `const`) so the swap can replace the reference.
+let _snapCache = new Map<string, any>();
 let _snapLoaded = false;
 
 function snapKey(champId: number, role: string, tier: string | null) {
@@ -57,12 +59,21 @@ export async function preloadSnapshots() {
   let offset = 0;
   let total = 0;
   const seen = new Set<string>();
+  const next = new Map<string, any>(); // built fresh, swapped in at the end
 
   while (true) {
     const { data, error } = await supabaseAdmin
       .from("champion_stats_snapshots")
       .select("champion_id, role, tier, data, snapshot_date")
+      // snapshot_date alone is NOT unique — paginating a non-unique sort makes
+      // PostgREST reorder rows across .range() pages, silently skipping some and
+      // picking the wrong "latest". The (champion_id, role, tier) tiebreaker makes
+      // the total order deterministic so pagination is stable. Without it the cache
+      // was loading 549/579 keys and mis-dating champions (e.g. Jinx → stale row).
       .order("snapshot_date", { ascending: false })
+      .order("champion_id", { ascending: true })
+      .order("role", { ascending: true })
+      .order("tier", { ascending: true, nullsFirst: false })
       .range(offset, offset + PAGE - 1);
 
     if (error) {
@@ -76,7 +87,7 @@ export async function preloadSnapshots() {
       const k = snapKey(row.champion_id, row.role, row.tier);
       if (seen.has(k)) continue;
       seen.add(k);
-      _snapCache.set(k, row.data);
+      next.set(k, row.data);
     }
 
     total += data.length;
@@ -84,6 +95,7 @@ export async function preloadSnapshots() {
     if (data.length < PAGE) break;
   }
 
+  _snapCache = next; // atomic swap — readers never observe a half-built cache
   _snapLoaded = true;
   console.log(`✅ Preloaded ${_snapCache.size} snapshots (${total} rows) in ${Date.now() - t0}ms`);
 }
