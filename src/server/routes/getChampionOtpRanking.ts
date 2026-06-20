@@ -3,7 +3,7 @@
 // Queries participants table directly (has all 104k+ matches).
 // An OTP has >= 25% of their ranked games on that champion with >= 5 games minimum.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match → box, users → Cloud (hybrid)
 import { getAccountByPuuid, getRankedDataBySummonerId } from "../riot";
 // Season window not needed — all data from DB
 
@@ -61,7 +61,7 @@ export async function getChampionOtpRankingHandler(req: Request): Promise<Respon
 async function fallbackOtpRanking(championName: string, regionKey: string, cacheKey?: string): Promise<Response> {
   // Step 1: Get all puuids who played this champion with aggregated stats
   // Increase limit to get all matches (default is 1000)
-  const { data: champRows, error: e1 } = await supabaseAdmin
+  const { data: champRows, error: e1 } = await supabaseMatchAdmin
     .from("participants")
     .select("puuid, match_id, win, kills, deaths, assists, perk_keystone, perk_sub_style, summoner_name")
     .eq("champion_name", championName)
@@ -120,7 +120,7 @@ async function fallbackOtpRanking(championName: string, regionKey: string, cache
 
   // Step 2: Get total games per puuid (all champions)
   // Batch in chunks to avoid query size limits
-  const { data: totalRows } = await supabaseAdmin
+  const { data: totalRows } = await supabaseMatchAdmin
     .from("participants")
     .select("puuid")
     .in("puuid", qualifiedPuuids)

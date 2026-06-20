@@ -42,3 +42,35 @@ export async function currentPatchPrefix(): Promise<string> {
   }
   return _patch;
 }
+
+// The N most-recent patch prefixes, newest-first, cached ~10 min. Powers PATCH
+// VARIATION: the subject cohort is scoped to exactly these patches and grouped
+// by patch so the UI can plot drift across them. Uses the indexed `patch`
+// column (same value the compiler filters on).
+let _recent: string[] = [];
+let _recentN = 0;
+let _recentAt = 0;
+export async function recentPatches(n = 6): Promise<string[]> {
+  const now = Date.now();
+  if (_recent.length && _recentN >= n && now - _recentAt < 600_000) return _recent.slice(0, n);
+  try {
+    const { rows } = await explorerPool().query(
+      `SELECT patch
+         FROM matches
+        WHERE patch IS NOT NULL
+        GROUP BY patch
+        ORDER BY max(game_creation) DESC
+        LIMIT $1`,
+      [n]
+    );
+    const list = rows.map((r) => r.patch as string).filter(Boolean);
+    if (list.length) {
+      _recent = list;
+      _recentN = n;
+      _recentAt = now;
+    }
+  } catch {
+    /* fall through to whatever we have cached (possibly empty) */
+  }
+  return _recent.slice(0, n);
+}

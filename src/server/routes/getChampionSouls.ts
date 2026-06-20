@@ -1,5 +1,5 @@
 // routes/getChampionSouls.ts — Dragon soul winrates per champion/role
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // match data → box (hybrid)
 
 export async function getChampionSoulsHandler(req: Request): Promise<Response> {
   try {

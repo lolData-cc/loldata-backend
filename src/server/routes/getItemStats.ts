@@ -1,5 +1,5 @@
 // routes/getItemStats.ts
-import { supabase } from "../supabase/client"
+import { supabaseMatch as supabase } from "../supabase/client" // match data → box (hybrid)
 
 export async function getItemStatsHandler(req: Request): Promise<Response> {
   try {

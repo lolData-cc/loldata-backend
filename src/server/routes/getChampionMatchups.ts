@@ -1,5 +1,5 @@
 // routes/getChampionMatchups.ts
-import { supabase } from "../supabase/client"
+import { supabaseMatch as supabase } from "../supabase/client" // match data → box (hybrid)
 
 type Row = {
   champion_id_1: number

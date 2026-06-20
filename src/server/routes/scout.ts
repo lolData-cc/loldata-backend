@@ -2,7 +2,7 @@
 // Scout / Feed lobbies — shareable groups of up to 20 players (each with
 // up to 3 Riot accounts). Public read by slug, owner-key gated writes.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // scout_* → Cloud, participants → box (hybrid)
 import { ingestQuickThenBackground } from "../services/matchIngest";
 import { writeRankSnapshot, ladderScore, invalidatePuuidLobbyCache, isPuuidInAnyLobby } from "../services/rankSnapshot";
 import {
@@ -631,7 +631,7 @@ export async function resolvePuuidHandler(
   }
 
   // 1. participants table — any row with riot_id_tagline for this puuid
-  const { data: partRow } = await supabaseAdmin
+  const { data: partRow } = await supabaseMatchAdmin
     .from("participants")
     .select(
       "summoner_name, riot_id_tagline, matches!inner(platform)"
@@ -878,7 +878,7 @@ export async function readScoutStatsHandler(
   let rows: any[];
   try {
     rows = await fetchAllPaged<any>((from, to) =>
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("participants")
         .select(
           "puuid, match_id, win, kills, deaths, assists, matches!inner(game_creation)"
@@ -1035,7 +1035,7 @@ export async function readScoutChampionsHandler(
   let rows: any[];
   try {
     rows = await fetchAllPaged<any>((from, to) => {
-      let q = supabaseAdmin
+      let q = supabaseMatchAdmin
         .from("participants")
         .select(
           "puuid, match_id, champion_name, win, kills, deaths, assists, matches!inner(game_creation)"
@@ -1259,7 +1259,7 @@ export async function readScoutHabitsHandler(
   let rows: any[];
   try {
     rows = await fetchAllPaged<any>((from, to) => {
-      let q = supabaseAdmin
+      let q = supabaseMatchAdmin
         .from("participants")
         .select("puuid, match_id, win, matches!inner(game_creation)")
         .in("puuid", allPuuids);
@@ -1465,7 +1465,7 @@ export async function readScoutTrendingHandler(
   let rows: any[];
   try {
     rows = await fetchAllPaged<any>((from, to) =>
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("participants")
         .select(
           `puuid, match_id, champion_name, role, win,
@@ -2339,7 +2339,7 @@ export async function readScoutLeaderboardHandler(
   let partRows: any[];
   try {
     partRows = await fetchAllPaged<any>((from, to) => {
-      let q = supabaseAdmin
+      let q = supabaseMatchAdmin
         .from("participants")
         .select(
           "puuid, match_id, team_id, win, kills, deaths, assists, matches!inner(game_creation, queue_id)"

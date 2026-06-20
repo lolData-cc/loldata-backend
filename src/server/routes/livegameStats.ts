@@ -2,7 +2,7 @@
 // Returns champion winrate + filled detection for live game participants.
 // Reads from season_champion_aggregates + participants tables (populated by cron).
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match → box, users → Cloud (hybrid)
 import { getCurrentSeasonWindow } from "../season";
 
 type ParticipantInput = {
@@ -72,7 +72,7 @@ export async function getLivegameStatsHandler(req: Request): Promise<Response> {
     // 2. Batch-fetch champion stats + role distribution in parallel
     const [{ data: champRows }, { data: roleRows }] = await Promise.all([
       // Champion-specific stats from season aggregates
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("season_champion_aggregates")
         .select("puuid, champion, games, wins")
         .eq("season_start", seasonStart)
@@ -81,7 +81,7 @@ export async function getLivegameStatsHandler(req: Request): Promise<Response> {
 
       // Role distribution from participants table
       // We need to count games per role per puuid
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("participants")
         .select("puuid, role")
         .in("puuid", puuids)

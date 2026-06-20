@@ -1,5 +1,5 @@
 // routes/getChampionRunes.ts — Rune winrates per champion/role/opponent
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // match data → box (hybrid)
 import { getSnap } from "./getChampionStats";
 
 export async function getChampionRunesHandler(req: Request): Promise<Response> {

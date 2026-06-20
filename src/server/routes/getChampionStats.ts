@@ -1,5 +1,5 @@
 // src/routes/getChampionStats.ts
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // match data → box (hybrid)
 type ChampionStatsBody = {
   championId?: number | string;
   patch?: string | null;

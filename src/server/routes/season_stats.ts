@@ -3,7 +3,7 @@
 // No more background Riot API fetching — ingestion handles everything.
 
 import type { SeasonStatsPayload } from "../seasonCache";
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // match data → box (hybrid)
 import { getCurrentSeasonWindow } from "../season";
 
 /**

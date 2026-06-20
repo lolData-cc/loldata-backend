@@ -1,7 +1,7 @@
 // src/server/routes/getTierlist.ts
 // Generates daily tier list snapshots (per-region) and serves them via API.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // match data → box (hybrid)
 
 const ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"] as const;
 const SNAPSHOT_REGIONS = ["ALL", "EUW", "NA", "KR"] as const;

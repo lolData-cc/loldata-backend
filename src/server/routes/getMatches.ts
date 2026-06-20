@@ -3,7 +3,7 @@
 // Match details are fetched in parallel batches from Riot (with in-memory cache).
 // DB ingestion runs purely in the background — never blocks the response.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match tables → box, users → Cloud (hybrid)
 import { getAccountByRiotId, getMatchDetails, getMatchIdsByPuuidOpts, RateLimitError } from "../riot";
 import { ingestQuickThenBackground } from "../services/matchIngest";
 import { getCurrentSeasonWindow } from "../season";
@@ -193,7 +193,7 @@ async function fetchFromDB(
   puuid: string, region: string, offset: number, limit: number
 ): Promise<any | null> {
   try {
-    const { data: pRows } = await supabaseAdmin
+    const { data: pRows } = await supabaseMatchAdmin
       .from("participants")
       .select("match_id, champion_name, win")
       .eq("puuid", puuid)
@@ -204,7 +204,7 @@ async function fetchFromDB(
     const matchIds = pRows.map(r => r.match_id);
     const pLookup = new Map(pRows.map(r => [r.match_id, r]));
 
-    const { data: meta } = await supabaseAdmin
+    const { data: meta } = await supabaseMatchAdmin
       .from("matches")
       .select("match_id, queue_id, game_creation")
       .in("match_id", matchIds)

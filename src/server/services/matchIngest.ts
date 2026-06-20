@@ -5,7 +5,7 @@
 
 import { getMatchDetails, getMatchIdsByPuuidOpts } from "../riot";
 import { getCurrentSeasonWindow } from "../season";
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // pure match data → box (hybrid)
 import { markIngesting, markDone } from "./ingestionTracker";
 import { snapshotIfTracked } from "./rankSnapshot";
 import { checkBountyForMatch } from "./scoutBounty";

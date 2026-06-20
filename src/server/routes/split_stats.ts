@@ -3,7 +3,7 @@
 // Mirrors /api/season_stats but filters by matches.game_creation >= splitStart.
 // No background fetching — reads only what's already in DB via matchIngest.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // match data → box (hybrid)
 import { getCurrentSplitWindow } from "../season";
 
 const Q_SOLO = 420;

@@ -1,4 +1,4 @@
-import { supabase } from "../supabase/client"
+import { supabaseMatch as supabase } from "../supabase/client" // match data → box (hybrid)
 
 export async function getItemBestUtilizersHandler(req: Request): Promise<Response> {
   try {

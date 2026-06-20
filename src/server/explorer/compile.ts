@@ -26,16 +26,20 @@ export type ChampSpec = {
   role?: Role;
   items?: number[];
   keystones?: number[];
+  itemSlots?: Record<string, number>; // itemId → required build slot (1-6 = Nth completed item); absent = any slot
+  excludeItems?: number[];    // items this champ must NOT have built (EXCLUDE submodule)
+  excludeKeystones?: number[]; // keystones this champ must NOT have run
 };
 
 export type Constraint =
-  | ({ type: "ally" } & ChampSpec)
-  | ({ type: "enemy" } & ChampSpec);
+  | ({ type: "ally"; negate?: boolean } & ChampSpec)   // negate = NOT EXISTS such an ally
+  | ({ type: "enemy"; negate?: boolean } & ChampSpec);
 
 export type Filters = {
   scope?: "current_patch" | "all";
   tiers?: string[];
   queues?: number[];
+  platforms?: string[]; // region filter: lowercase platform codes (e.g. "euw1"); empty/absent = all regions
 };
 
 export type Output =
@@ -46,12 +50,14 @@ export type Output =
       role?: Role;
       limit?: number;
       minGames?: number;
+      itemPool?: number[]; // dimension "item": restrict the ranking to these ids (real build items)
     };
 
 export type ExplorerGraph = {
   subject: ChampSpec;
   constraints?: Constraint[];
   filters?: Filters;
+  itemPool?: number[]; // completed-item id set; used to order "Nth completed item" for build-slot filters
   output: Output;
 };
 
@@ -61,40 +67,110 @@ export type CompiledQuery = {
   mode: "current_patch" | "all";
 };
 
-export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
-  const params: unknown[] = [];
-  const P = (v: unknown) => `$${params.push(v)}`;
-  // "<alias> built item X in ANY slot" — alias "" = unqualified (CTE body)
+// How the subject cohort is scoped on the time axis:
+//  - current: a single patch (the live one)   → `patch = $`
+//  - all:     no patch filter (whole season)  → (nothing)
+// PATCH VARIATION doesn't need a third "list" scope — it just runs the fast
+// single-patch query once per recent patch (see explorerPatchHandler).
+type PatchScope =
+  | { kind: "current"; patch: string }
+  | { kind: "all" };
+
+// Shared cohort builder: the MATERIALIZED subject CTE (index-friendly filters +
+// the patch/queue semi-join) and the ally/enemy EXISTS outer clause. The caller
+// appends the final SELECT. `P` is the shared param-pusher so every fragment's
+// params land in ONE ordered array. Keeping this in one place means `compile`
+// (stats/rank) and `compilePatchVariation` share identical, equally-tuned SQL.
+function buildCohort(g: ExplorerGraph, P: (v: unknown) => string, scope: PatchScope) {
+  // "<alias> built item X in ANY slot" — alias "" = unqualified (CTE body).
+  // Checks final inventory (item0..item6), so it's index-friendly and needs no
+  // timeline data.
   const itemOr = (alias: string, itemId: number) => {
     const a = alias ? `${alias}.` : "";
     const ph = P(Number(itemId) | 0);
     return `(${a}item0=${ph} OR ${a}item1=${ph} OR ${a}item2=${ph} OR ${a}item3=${ph} OR ${a}item4=${ph} OR ${a}item5=${ph} OR ${a}item6=${ph})`;
   };
 
+  // Build-slot constraint: "<alias> bought item X as its Nth COMPLETED item".
+  // Windowed over the player's ITEM_PURCHASED timeline events, restricted to the
+  // completed-item pool so component purchases (Long Sword, etc.) don't count as
+  // slots. Only matches WITH timeline data (participant_item_events) qualify — so
+  // a slot filter narrows the sample to timeline-covered games. Falls back to
+  // ordering all purchases if no pool was shipped.
+  const itemPool = (g.itemPool ?? []).map((n) => Number(n) | 0).filter((n) => n > 0);
+  const slotOf = (spec: ChampSpec | Constraint | undefined, itemId: number): number => {
+    const n = Number(spec?.itemSlots?.[String(itemId)]) | 0;
+    return n >= 1 && n <= 6 ? n : 0;
+  };
+  // A build-slot constraint = "the Nth completed-item purchase (by time) is this
+  // item". A scalar subquery scans the player's purchases in ts order via the pkey
+  // prefix index and SHORT-CIRCUITS at OFFSET+LIMIT — ~0.5s even for an all-patch
+  // popular champ. (Measured alternatives: `count(*)=N-1` was ~40× slower — it
+  // can't stop early; a global precomputed CTE was worse still, since popular items
+  // like Liandry have 200k+ purchases across all champs.) Subject = the un-aliased
+  // CTE table `participants`; ally/enemy = the EXISTS alias x.
+  const slotItem = (alias: string, itemId: number, slot: number) => {
+    const corr = alias ? `${alias}.` : "participants.";
+    const poolCond = itemPool.length ? `AND e.item_id = ANY(${P(itemPool)})` : "AND e.item_id <> 0";
+    return `(SELECT e.item_id FROM participant_item_events e
+      WHERE e.match_id = ${corr}match_id AND e.participant_id = ${corr}participant_id
+        AND e.event_type = 'PURCHASE' ${poolCond}
+      ORDER BY e.ts_ms OFFSET ${P(Math.max(0, slot - 1))} LIMIT 1) = ${P(Number(itemId) | 0)}`;
+  };
+
   // ── subject CTE filters (on `participants`, index-friendly) ──
   const cte: string[] = [];
   if (g.subject?.champion) cte.push(`champion_name = ${P(g.subject.champion)}`);
   if (g.subject?.role && ROLES.has(g.subject.role)) cte.push(`role = ${P(g.subject.role)}`);
-  for (const it of g.subject?.items ?? []) cte.push(itemOr("", it));
+  // Subject build-slot checks run on `s` AFTER it materializes (the cohort is
+  // already narrowed by champion + patch/queue/region/tier), not inside the CTE
+  // where the planner might probe the slot per row over the whole champion pool.
+  const subjectSlots: string[] = [];
+  for (const it of g.subject?.items ?? []) {
+    const slot = slotOf(g.subject, it);
+    if (slot) subjectSlots.push(slotItem("s", it, slot));
+    else cte.push(itemOr("", it)); // final-inventory check is index-friendly — keep it in the CTE
+  }
   const sk = (g.subject?.keystones ?? []).map((n) => Number(n) | 0).filter(Boolean);
   if (sk.length) cte.push(`perk_keystone = ANY(${P(sk)})`);
+  // EXCLUDE: the subject must NOT have built these items / run these keystones.
+  for (const it of g.subject?.excludeItems ?? []) cte.push(`NOT ${itemOr("", it)}`);
+  const sek = (g.subject?.excludeKeystones ?? []).map((n) => Number(n) | 0).filter(Boolean);
+  if (sek.length) cte.push(`(perk_keystone IS NULL OR perk_keystone <> ALL(${P(sek)}))`);
   const tiers = (g.filters?.tiers ?? []).filter((t) => TIERS.has(t));
   if (tiers.length) cte.push(`tier = ANY(${P(tiers)})`);
   // Patch + queue scoping is pushed INTO the subject CTE as a `match_id IN
   // (SELECT … FROM matches …)` semi-join, NOT a join in the outer query. This
-  // narrows the subject to the current patch BEFORE any ally/enemy EXISTS runs,
-  // so a high-volume champion (all-patch Ezreal ≈ 120k rows) is materialized
-  // down to its ~current-patch slice first and the EXISTS probes only those.
+  // narrows the subject to the chosen patch(es) BEFORE any ally/enemy EXISTS
+  // runs, so a high-volume champion (all-patch Ezreal ≈ 120k rows) is
+  // materialized down to its scoped slice first and the EXISTS probes only those.
   // With matches joined in the outer query the planner ran the EXISTS across all
   // 120k rows before applying the patch filter — 28s, tripping the timeout.
   // `patch` is an indexed column (idx_matches_patch_queue) = the major.minor of
-  // game_version, so this is a clean equality, not a LIKE.
-  const scope: "current_patch" | "all" = g.filters?.scope === "all" ? "all" : "current_patch";
+  // game_version, so this is a clean equality/ANY, not a LIKE.
   const matchCond: string[] = [];
-  if (scope === "current_patch") matchCond.push(`patch = ${P(patchPrefix)}`);
+  if (scope.kind === "current") matchCond.push(`patch = ${P(scope.patch)}`);
   const queues = g.filters?.queues?.length ? g.filters.queues.map((q) => Number(q) | 0) : [420, 440];
   matchCond.push(`queue_id = ANY(${P(queues)})`);
-  cte.push(`match_id IN (SELECT match_id FROM matches WHERE ${matchCond.join(" AND ")})`);
+  // region filter: `matches.platform` is the lowercase platform code (e.g. "euw1")
+  // — indexed, so it lives in the same matches semi-join as patch/queue.
+  const plats = (g.filters?.platforms ?? [])
+    .map((p) => String(p).toLowerCase().trim())
+    .filter((p) => /^[a-z]{2,4}[0-9]?$/.test(p));
+  if (plats.length) matchCond.push(`platform = ANY(${P(plats)})`);
+  const matchSub = `SELECT match_id FROM matches WHERE ${matchCond.join(" AND ")}`;
+  // For a PATCH-SCOPED query, wrap the match set in ARRAY(...) instead of a bare
+  // `match_id IN (subquery)`. The array form lets the planner use it as an index
+  // condition on idx_participants_cname_match (champion_name, match_id), so it
+  // touches ONLY the current-patch rows of the champion. With `IN (subquery)` the
+  // planner scans ALL of the champion's rows (every patch) via the champion_name
+  // index and applies the patch filter afterwards — for a mega-popular champion
+  // (Kai'Sa ≈ 105k all-patch rows, ~1 per heap page) that's ~760 MB of random
+  // reads and ~47s. The ARRAY form restricts to the ~14k current-patch rows first:
+  // 47s → <1s warm, measured. (All-scope has no patch filter, so the array would
+  // be every ranked match — keep the plain semi-join there.)
+  if (scope.kind === "current") cte.push(`match_id = ANY(ARRAY(${matchSub}))`);
+  else cte.push(`match_id IN (${matchSub})`);
   const cteWhere = `WHERE ${cte.join(" AND ")}`;
 
   // ── outer filters: ally/enemy existence only (patch/queue now in the CTE) ──
@@ -109,26 +185,51 @@ export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
     if (c.type === "ally") sub.push(`x.puuid <> s.puuid`);
     if (c.champion) sub.push(`x.champion_name = ${P(c.champion)}`);
     if (c.role && ROLES.has(c.role)) sub.push(`x.role = ${P(c.role)}`);
-    for (const it of c.items ?? []) sub.push(itemOr("x", it));
+    for (const it of c.items ?? []) {
+      const slot = slotOf(c, it);
+      sub.push(slot ? slotItem("x", it, slot) : itemOr("x", it));
+    }
     const ck = (c.keystones ?? []).map((n) => Number(n) | 0).filter(Boolean);
     if (ck.length) sub.push(`x.perk_keystone = ANY(${P(ck)})`);
+    // EXCLUDE wired into an item/rune ON the ally/enemy → that ally must NOT have it.
+    for (const it of c.excludeItems ?? []) sub.push(`NOT ${itemOr("x", it)}`);
+    const cek = (c.excludeKeystones ?? []).map((n) => Number(n) | 0).filter(Boolean);
+    if (cek.length) sub.push(`(x.perk_keystone IS NULL OR x.perk_keystone <> ALL(${P(cek)}))`);
     // `LIMIT 1 OFFSET 0` is an optimization fence. Without it, adding a role
     // filter to the ally/enemy EXISTS makes the planner flatten it into a hash
     // semi-join that bulk-scans the entire (champion_name, role) cohort across
     // ALL patches (~14k rows) before applying the current-patch filter — 25-30s,
     // tripping the statement_timeout ("query too heavy"). The fence keeps it a
     // correlated per-match index probe (idx_participants_cname_match), ~5× faster.
-    outer.push(`EXISTS (SELECT 1 FROM participants x WHERE ${sub.join(" AND ")} LIMIT 1 OFFSET 0)`);
+    // `negate` (EXCLUDE on the ally/enemy itself) flips EXISTS → NOT EXISTS.
+    outer.push(`${c.negate ? "NOT EXISTS" : "EXISTS"} (SELECT 1 FROM participants x WHERE ${sub.join(" AND ")} LIMIT 1 OFFSET 0)`);
   }
 
+  // Subject build-slot predicates are evaluated in the OUTER query, against the
+  // already-materialized (and narrowed) cohort `s` — so participant_id must be in
+  // s's SELECT list.
+  outer.push(...subjectSlots);
   const cteSql = `WITH s AS MATERIALIZED (
-  SELECT match_id, team_id, puuid, win, kills, deaths, assists, total_cs, gold_earned,
+  SELECT match_id, participant_id, team_id, puuid, win, kills, deaths, assists, total_cs, gold_earned,
          item0, item1, item2, item3, item4, item5, item6
   FROM participants
   ${cteWhere}
 )`;
   const base = `FROM s`;
   const outerWhere = outer.length ? `WHERE ${outer.join("\n    AND ")}` : "";
+  return { cteSql, base, outerWhere };
+}
+
+export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
+  const params: unknown[] = [];
+  const P = (v: unknown) => `$${params.push(v)}`;
+
+  const scope: "current_patch" | "all" = g.filters?.scope === "all" ? "all" : "current_patch";
+  const { cteSql, base, outerWhere } = buildCohort(
+    g,
+    P,
+    scope === "all" ? { kind: "all" } : { kind: "current", patch: patchPrefix }
+  );
 
   // ── output: single aggregate ──
   if (g.output.kind === "stats") {
@@ -170,6 +271,11 @@ export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
   }
 
   if (dim === "item") {
+    // Only rank real build items: the frontend passes the current completed-item +
+    // boots id set (no components, no trinkets). Falls back to "any non-empty slot"
+    // if no pool is given. The trinket slot (item6) is excluded by the pool anyway.
+    const pool = (g.output.itemPool ?? []).map((n) => Number(n) | 0).filter((n) => n > 0);
+    const itemCond = pool.length ? `it.item = ANY(${P(pool)})` : "it.item IS NOT NULL AND it.item <> 0";
     const andOr = outerWhere ? "AND" : "WHERE";
     const text = `${cteSql}
   SELECT it.item AS dimension,
@@ -178,7 +284,7 @@ export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
   ${base}
   CROSS JOIN LATERAL (VALUES (s.item0),(s.item1),(s.item2),(s.item3),(s.item4),(s.item5),(s.item6)) AS it(item)
   ${outerWhere}
-  ${andOr} it.item IS NOT NULL AND it.item <> 0
+  ${andOr} ${itemCond}
   GROUP BY it.item
   HAVING count(*) >= ${P(minGames)}
   ORDER BY winrate DESC, games DESC

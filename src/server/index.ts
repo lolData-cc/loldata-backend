@@ -7,7 +7,8 @@ import { Buffer } from "buffer";
 import { logger } from "./logger";
 import { checkProHandler } from "./routes/checkPro"
 import { getMatchesHandler } from "./routes/getMatches"
-import { explorerQueryHandler } from "./explorer/query"
+import { explorerQueryHandler, explorerPatchHandler, explorerPatchExactHandler, rebuildPatchStatsHandler } from "./explorer/query"
+import { rebuildPatchStats } from "./explorer/patchStats"
 import { getMatchAnalysisHandler } from "./routes/getMatchAnalysis"
 import { getSummonerHandler } from "./routes/getSummoner"
 import { matchupsHandler } from "./routes/aihelp/matchups"
@@ -128,6 +129,16 @@ const SNAP_RELOAD_MS = Number(process.env.SNAP_RELOAD_MS ?? "900000"); // 15 min
 setInterval(() => {
   preloadSnapshots().catch((e) => console.error("snapshot reload failed:", e));
 }, SNAP_RELOAD_MS);
+
+// Refresh the Explorer PATCH VARIATION aggregate (explorer_patch_stats). It's a
+// ~40s full GROUP-BY scan, so run it on a long interval (default 3h), NOT every
+// snapshot reload. The table self-bootstraps inside rebuildPatchStats().
+const PATCH_STATS_REBUILD_MS = Number(process.env.PATCH_STATS_REBUILD_MS ?? "10800000"); // 3h
+setInterval(() => {
+  rebuildPatchStats()
+    .then((n) => console.log(`[explorer] explorer_patch_stats rebuilt: ${n} rows`))
+    .catch((e) => console.error("patch-stats rebuild failed:", e));
+}, PATCH_STATS_REBUILD_MS);
 
 // Start the periodic scout rank-snapshot sweep so LP gets tracked even
 // when nobody is looking at any lobby.
@@ -408,6 +419,18 @@ if (pathname === "/api/matches" && req.method === "POST") {
 
 if (pathname === "/api/explorer/query" && req.method === "POST") {
   return withLogAndCors(req, pathname, explorerQueryHandler);
+}
+
+if (pathname === "/api/explorer/patches" && req.method === "POST") {
+  return withLogAndCors(req, pathname, explorerPatchHandler);
+}
+
+if (pathname === "/api/explorer/patches/exact" && req.method === "POST") {
+  return withLogAndCors(req, pathname, explorerPatchExactHandler);
+}
+
+if (pathname === "/api/admin/rebuild-patch-stats" && req.method === "POST") {
+  return withLogAndCors(req, pathname, rebuildPatchStatsHandler);
 }
 
 if (pathname === "/api/match/analysis" && req.method === "POST") {
