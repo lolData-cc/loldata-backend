@@ -88,6 +88,13 @@ export async function writeRankSnapshot(
   region: string,
   matchId: string | null = null
 ): Promise<void> {
+  // BOX_READ_ONLY — during the self-host migration the box backend shares
+  // the prod Riot key with Railway. Writing a rank snapshot is a Riot
+  // side-effect (it fetches league-v4 BEFORE deduping), so the box must
+  // no-op here to avoid competing for the shared rate budget. Unset on
+  // prod/Railway → full behavior. Covers EVERY caller (periodic sweep,
+  // opportunistic lobby-read snapshot, refresh endpoints, post-match hook).
+  if (process.env.BOX_READ_ONLY === "true") return;
   const tag = puuid.slice(0, 8);
   let entries: any[];
   try {

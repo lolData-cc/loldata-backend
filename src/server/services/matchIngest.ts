@@ -450,6 +450,10 @@ export async function ingestPlayerMatches(
   puuid: string,
   region: string
 ): Promise<{ newMatches: number; totalInDb: number }> {
+  // BOX_READ_ONLY — skip on-demand Riot match backfill on the box during the
+  // migration (shared prod Riot key). The box serves only the already-migrated
+  // match data; real ingestion stays on Railway until cutover. Unset → full.
+  if (process.env.BOX_READ_ONLY === "true") return { newMatches: 0, totalInDb: 0 };
   const { startTime, endTime } = getCurrentSeasonWindow();
   const seasonStart = Number(startTime ?? 0);
   const seasonEnd = endTime ?? null;
