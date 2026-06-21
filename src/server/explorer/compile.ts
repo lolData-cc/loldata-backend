@@ -13,6 +13,13 @@
 // every ally/enemy) carries its own item + keystone constraints. Everything is
 // parameterized; roles/tiers/dimensions are validated against allowlists.
 
+import { championsInClass, type ChampClass, CHAMP_CLASSES } from "./champClass";
+
+// Bayesian prior strength for the weighted item ranking: an item's winrate is
+// shrunk toward the cohort baseline with this many "phantom" games, so a small
+// sample regresses to the champ's average (see the item-rank branch in compile).
+const ITEM_PRIOR_C = 150;
+
 export type Role = "TOP" | "JUNGLE" | "MIDDLE" | "BOTTOM" | "UTILITY";
 
 const ROLES = new Set<string>(["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]);
@@ -53,9 +60,19 @@ export type Output =
       itemPool?: number[]; // dimension "item": restrict the ranking to these ids (real build items)
     };
 
+// A team-composition constraint: "the <side> team has at least <min> champions
+// of class <cls>" (e.g. enemy ≥3 Assassins). Expanded in buildCohort to a COUNT
+// over the relevant team's participants via the champion→class map (champClass).
+export type CompConstraint = {
+  side: "ally" | "enemy";
+  cls: ChampClass;
+  min: number;
+};
+
 export type ExplorerGraph = {
   subject: ChampSpec;
   constraints?: Constraint[];
+  categories?: CompConstraint[];
   filters?: Filters;
   itemPool?: number[]; // completed-item id set; used to order "Nth completed item" for build-slot filters
   output: Output;
@@ -72,7 +89,7 @@ export type CompiledQuery = {
 //  - all:     no patch filter (whole season)  → (nothing)
 // PATCH VARIATION doesn't need a third "list" scope — it just runs the fast
 // single-patch query once per recent patch (see explorerPatchHandler).
-type PatchScope =
+export type PatchScope =
   | { kind: "current"; patch: string }
   | { kind: "all" };
 
@@ -81,7 +98,7 @@ type PatchScope =
 // appends the final SELECT. `P` is the shared param-pusher so every fragment's
 // params land in ONE ordered array. Keeping this in one place means `compile`
 // (stats/rank) and `compilePatchVariation` share identical, equally-tuned SQL.
-function buildCohort(g: ExplorerGraph, P: (v: unknown) => string, scope: PatchScope) {
+export function buildCohort(g: ExplorerGraph, P: (v: unknown) => string, scope: PatchScope) {
   // "<alias> built item X in ANY slot" — alias "" = unqualified (CTE body).
   // Checks final inventory (item0..item6), so it's index-friendly and needs no
   // timeline data.
@@ -205,6 +222,23 @@ function buildCohort(g: ExplorerGraph, P: (v: unknown) => string, scope: PatchSc
     outer.push(`${c.negate ? "NOT EXISTS" : "EXISTS"} (SELECT 1 FROM participants x WHERE ${sub.join(" AND ")} LIMIT 1 OFFSET 0)`);
   }
 
+  // ── team-composition (champion-class) constraints ──
+  // "the enemy/ally team has ≥N champions of class C". Expand C to its champion_name
+  // list (Data Dragon class map) and COUNT the relevant team's participants in it —
+  // a correlated per-match probe on the (match_id, team_id) index, same shape as the
+  // ally/enemy EXISTS. Unknown class / map not loaded → empty list → skipped (no-op).
+  for (const cc of g.categories ?? []) {
+    if (!CHAMP_CLASSES.includes(cc.cls)) continue;
+    const names = championsInClass(cc.cls);
+    if (names.length === 0) continue;
+    const min = Math.max(1, Math.min(5, Number(cc.min) | 0));
+    const teamExpr = cc.side === "ally" ? `cc.team_id = s.team_id` : `cc.team_id = 300 - s.team_id`;
+    const selfExcl = cc.side === "ally" ? ` AND cc.puuid <> s.puuid` : "";
+    outer.push(
+      `(SELECT count(*) FROM participants cc WHERE cc.match_id = s.match_id AND ${teamExpr}${selfExcl} AND cc.champion_name = ANY(${P(names)})) >= ${P(min)}`
+    );
+  }
+
   // Subject build-slot predicates are evaluated in the OUTER query, against the
   // already-materialized (and narrowed) cohort `s` — so participant_id must be in
   // s's SELECT list.
@@ -277,17 +311,34 @@ export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
     const pool = (g.output.itemPool ?? []).map((n) => Number(n) | 0).filter((n) => n > 0);
     const itemCond = pool.length ? `it.item = ANY(${P(pool)})` : "it.item IS NOT NULL AND it.item <> 0";
     const andOr = outerWhere ? "AND" : "WHERE";
-    const text = `${cteSql}
+    const C = ITEM_PRIOR_C;
+    // Items are ranked by a CONFIDENCE-WEIGHTED LIFT, not raw winrate:
+    //   score = (shrunk_wr − baseline) · log10(1 + games)
+    // shrunk_wr = (wins + C·baseline)/(games + C) regresses small samples toward the
+    // cohort's overall winrate (`coh.b`); the log10(games) factor rewards proven /
+    // high-pick items. So 55% over 8000g outranks 80% over 100g when the latter is
+    // noise, while a genuinely strong well-played item still rises. `coh` is the
+    // (filtered) cohort baseline; `lift`/`pickrate`/`baseline` are surfaced for the UI.
+    const text = `${cteSql},
+  coh AS (SELECT count(*)::int AS n, avg((s.win)::int) AS b FROM s ${outerWhere})
   SELECT it.item AS dimension,
          count(*)::int AS games,
-         round(avg((s.win)::int) * 100, 2)::float8 AS winrate
+         round(avg((s.win)::int) * 100, 2)::float8 AS winrate,
+         round((avg((s.win)::int) - max(coh.b)) * 100, 2)::float8 AS lift,
+         round(count(*)::numeric / nullif(max(coh.n), 0) * 100, 2)::float8 AS pickrate,
+         round(max(coh.b) * 100, 2)::float8 AS baseline,
+         round(
+           (((sum((s.win)::int) + ${C} * max(coh.b)) / (count(*) + ${C})) - max(coh.b))
+           * log(10, (1 + count(*))::numeric)
+         , 5)::float8 AS score
   ${base}
   CROSS JOIN LATERAL (VALUES (s.item0),(s.item1),(s.item2),(s.item3),(s.item4),(s.item5),(s.item6)) AS it(item)
+  CROSS JOIN coh
   ${outerWhere}
   ${andOr} ${itemCond}
   GROUP BY it.item
   HAVING count(*) >= ${P(minGames)}
-  ORDER BY winrate DESC, games DESC
+  ORDER BY score DESC, games DESC
   LIMIT ${P(limit)}`;
     return { text, params, mode: scope };
   }

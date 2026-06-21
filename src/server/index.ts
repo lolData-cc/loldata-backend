@@ -9,6 +9,9 @@ import { checkProHandler } from "./routes/checkPro"
 import { getMatchesHandler } from "./routes/getMatches"
 import { explorerQueryHandler, explorerPatchHandler, explorerPatchExactHandler, rebuildPatchStatsHandler } from "./explorer/query"
 import { rebuildPatchStats } from "./explorer/patchStats"
+import { explorerBuildPathHandler } from "./explorer/buildPath"
+import { explorerItemStrengthHandler } from "./explorer/itemStrength"
+import { warmChampClasses } from "./explorer/champClass"
 import { getMatchAnalysisHandler } from "./routes/getMatchAnalysis"
 import { getSummonerHandler } from "./routes/getSummoner"
 import { matchupsHandler } from "./routes/aihelp/matchups"
@@ -144,6 +147,11 @@ setInterval(() => {
 // when nobody is looking at any lobby.
 import { startScoutPeriodicSweep } from "./services/scoutPeriodic";
 startScoutPeriodicSweep();
+
+// Warm the champion class/damage map (Data Dragon) so the Explorer's category
+// filters + conditional item-strength analysis have data. Fire-and-forget; the
+// getters no-op safely until it's ready.
+warmChampClasses().catch((e) => console.error("[champClass] warm failed:", (e as Error)?.message ?? e));
 
 // 3.a) CREATE CHECKOUT SESSION
 async function createCheckoutSessionHandler(req: Request) {
@@ -427,6 +435,14 @@ if (pathname === "/api/explorer/patches" && req.method === "POST") {
 
 if (pathname === "/api/explorer/patches/exact" && req.method === "POST") {
   return withLogAndCors(req, pathname, explorerPatchExactHandler);
+}
+
+if (pathname === "/api/explorer/buildpath" && req.method === "POST") {
+  return withLogAndCors(req, pathname, explorerBuildPathHandler);
+}
+
+if (pathname === "/api/explorer/itemstrength" && req.method === "POST") {
+  return withLogAndCors(req, pathname, explorerItemStrengthHandler);
 }
 
 if (pathname === "/api/admin/rebuild-patch-stats" && req.method === "POST") {
