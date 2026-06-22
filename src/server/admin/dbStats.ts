@@ -15,6 +15,7 @@
 // count(*) participants ≈ 4.2s (too slow → use the planner's reltuples estimate).
 
 import type { Server } from "bun";
+import { statfsSync } from "node:fs";
 import { explorerPool } from "../explorer/pool";
 
 export const DBSTATS_TOPIC = "dbstats";
@@ -24,9 +25,25 @@ export type DbOverview = {
   matches: number;          // exact, count(*)
   dbSizeBytes: number;
   dbSizePretty: string;
+  diskTotalBytes?: number;  // capacity of the FS holding the DB data (gauge max)
+  diskUsedBytes?: number;   // whole-disk used (the DB is the dominant chunk)
   tables: TableStat[];      // public tables, biggest first
   generatedAt: number;
 };
+
+// Disk capacity of the filesystem holding the DB data, for the "fill" gauge. On
+// the box the PG data lives on "/" (md2 NVMe array). Best-effort: degrades to
+// null if statfs is unavailable, so the overview never fails on it.
+function diskCapacity(path = process.env.DB_DISK_PATH || "/"): { total: number; used: number } | null {
+  try {
+    const s = statfsSync(path);
+    const total = Number(s.bsize) * Number(s.blocks);
+    const used = Number(s.bsize) * (Number(s.blocks) - Number(s.bfree));
+    return total > 0 ? { total, used } : null;
+  } catch {
+    return null;
+  }
+}
 
 // exact match count, guarded by a short per-statement timeout so a heavy ingest
 // moment can't wedge the poll. SET LOCAL keeps the timeout off the pooled conn.
@@ -70,10 +87,13 @@ export async function getDbOverview(maxAgeMs = 20_000): Promise<DbOverview> {
         ORDER BY pg_total_relation_size(c.oid) DESC
         LIMIT 14`
     );
+    const disk = diskCapacity();
     _overview = {
       matches,
       dbSizeBytes: Number(size.rows[0].b),
       dbSizePretty: size.rows[0].p as string,
+      diskTotalBytes: disk?.total,
+      diskUsedBytes: disk?.used,
       tables: tbl.rows.map((r: any) => ({
         table: r.table as string,
         estRows: Math.max(0, Number(r.est_rows)),
