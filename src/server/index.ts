@@ -55,6 +55,12 @@ import {
   type ScoutWsData,
 } from "./realtime/scoutRealtime";
 import {
+  getDbOverview,
+  DBSTATS_TOPIC,
+  dbStatsSubscribed,
+  dbStatsUnsubscribed,
+} from "./admin/dbStats";
+import {
   readMatchSocialBatchHandler,
   toggleLikeHandler,
   readCommentsHandler,
@@ -407,6 +413,15 @@ const server = serve({
       }
     }
 
+    // ── WebSocket upgrade — live DB-stats ticker (admin dashboard) ──
+    // No slug; the socket just subscribes to the global DBSTATS topic and the
+    // server pushes a match-count tick every few seconds while it's connected.
+    if (pathname === "/api/admin/db-stats/ws") {
+      const upgraded = server.upgrade(req, { data: { dbstats: true } as any });
+      if (upgraded) return undefined;
+      return new Response("websocket upgrade failed", { status: 426 });
+    }
+
     // CORS preflight
     if (req.method === "OPTIONS") {
       return new Response(null, {
@@ -447,6 +462,12 @@ if (pathname === "/api/explorer/itemstrength" && req.method === "POST") {
 
 if (pathname === "/api/admin/rebuild-patch-stats" && req.method === "POST") {
   return withLogAndCors(req, pathname, rebuildPatchStatsHandler);
+}
+
+// Admin dashboard "Database" tab — row counts, DB size, biggest tables. Gated on
+// the frontend by isAdmin; counts are aggregate (no PII), like the other /admin/*.
+if (pathname === "/api/admin/db-stats" && req.method === "GET") {
+  return withLogAndCors(req, pathname, async () => Response.json(await getDbOverview()));
 }
 
 if (pathname === "/api/match/analysis" && req.method === "POST") {
@@ -866,17 +887,27 @@ if (pathname === "/api/webhooks/stripe" && req.method === "POST") {
   // ignored beyond a lightweight ping/pong keepalive.
   websocket: {
     open(ws) {
-      const { slug } = ws.data as ScoutWsData;
-      ws.subscribe(chatTopic(slug));
+      const d = ws.data as any;
+      if (d?.dbstats) {
+        ws.subscribe(DBSTATS_TOPIC);
+        dbStatsSubscribed(server);
+        return;
+      }
+      ws.subscribe(chatTopic((d as ScoutWsData).slug));
     },
     message(ws, raw) {
       // Keepalive only. The client may send "ping"; reply "pong".
       if (typeof raw === "string" && raw === "ping") ws.send("pong");
     },
     close(ws) {
-      const { slug } = ws.data as ScoutWsData;
+      const d = ws.data as any;
+      if (d?.dbstats) {
+        try { ws.unsubscribe(DBSTATS_TOPIC); } catch { /* gone */ }
+        dbStatsUnsubscribed();
+        return;
+      }
       try {
-        ws.unsubscribe(chatTopic(slug));
+        ws.unsubscribe(chatTopic((d as ScoutWsData).slug));
       } catch {
         /* already gone */
       }
