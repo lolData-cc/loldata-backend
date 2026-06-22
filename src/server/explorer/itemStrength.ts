@@ -23,6 +23,7 @@ import {
   CHAMP_CLASSES,
   championsInClass,
   championsByDamage,
+  championsByAttackType,
   champClassesReady,
   type ChampClass,
 } from "./champClass";
@@ -46,6 +47,8 @@ const CONDITION_LABEL: Record<string, string> = {
   Tank: "≥2 enemy Tanks",
   AD: "≥3 enemy AD champions",
   AP: "≥3 enemy AP champions",
+  Melee: "≥3 enemy melee champions",
+  Ranged: "≥3 enemy ranged champions",
 };
 
 export type StrengthVerdict = {
@@ -119,11 +122,19 @@ export async function itemStrength(
       cats.push(dmg);
     }
   }
+  for (const at of ["Melee", "Ranged"] as const) {
+    for (const nm of championsByAttackType(at)) {
+      names.push(nm);
+      cats.push(at);
+    }
+  }
 
   const conds: Cond[] = [
     ...CHAMP_CLASSES.map((c) => ({ cat: c as string, thr: CLASS_THRESHOLD })),
     { cat: "AD", thr: DAMAGE_THRESHOLD },
     { cat: "AP", thr: DAMAGE_THRESHOLD },
+    { cat: "Melee", thr: DAMAGE_THRESHOLD },
+    { cat: "Ranged", thr: DAMAGE_THRESHOLD },
   ];
 
   const params: unknown[] = [];

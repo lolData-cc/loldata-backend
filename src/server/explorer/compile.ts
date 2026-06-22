@@ -13,7 +13,7 @@
 // every ally/enemy) carries its own item + keystone constraints. Everything is
 // parameterized; roles/tiers/dimensions are validated against allowlists.
 
-import { championsInClass, type ChampClass, CHAMP_CLASSES } from "./champClass";
+import { categoryMembers, isChampCategory, type ChampCategory } from "./champClass";
 
 // Bayesian prior strength for the weighted item ranking: an item's winrate is
 // shrunk toward the cohort baseline with this many "phantom" games, so a small
@@ -65,7 +65,7 @@ export type Output =
 // over the relevant team's participants via the champion→class map (champClass).
 export type CompConstraint = {
   side: "ally" | "enemy";
-  cls: ChampClass;
+  cls: ChampCategory; // a roster class, a damage profile (AD/AP), or attack type (Melee/Ranged)
   min: number;
 };
 
@@ -228,8 +228,8 @@ export function buildCohort(g: ExplorerGraph, P: (v: unknown) => string, scope: 
   // a correlated per-match probe on the (match_id, team_id) index, same shape as the
   // ally/enemy EXISTS. Unknown class / map not loaded → empty list → skipped (no-op).
   for (const cc of g.categories ?? []) {
-    if (!CHAMP_CLASSES.includes(cc.cls)) continue;
-    const names = championsInClass(cc.cls);
+    if (!isChampCategory(cc.cls)) continue;
+    const names = categoryMembers(cc.cls);
     if (names.length === 0) continue;
     const min = Math.max(1, Math.min(5, Number(cc.min) | 0));
     const teamExpr = cc.side === "ally" ? `cc.team_id = s.team_id` : `cc.team_id = 300 - s.team_id`;

@@ -34,12 +34,22 @@ export const CHAMP_CLASSES: ChampClass[] = [
 ];
 
 export type DamageType = "AD" | "AP" | "Hybrid";
+export type AttackType = "Melee" | "Ranged";
 
-export type ChampInfo = { classes: ChampClass[]; damage: DamageType };
+// The full set of champion CATEGORIES usable as Explorer team-comp filters and
+// item-strength buckets: the 6 roster classes + damage profile (AD/AP) + attack
+// type (Melee/Ranged). "Hybrid" damage is intentionally NOT exposed (too fuzzy).
+export type ChampCategory = ChampClass | "AD" | "AP" | "Melee" | "Ranged";
+export const EXTRA_CATEGORIES = ["AD", "AP", "Melee", "Ranged"] as const;
+export const CHAMP_CATEGORIES: ChampCategory[] = [...CHAMP_CLASSES, ...EXTRA_CATEGORIES];
+
+export type ChampInfo = { classes: ChampClass[]; damage: DamageType; attackType: AttackType };
 
 const VERSIONS_URL = "https://ddragon.leagueoflegends.com/api/versions.json";
+// championFull.json carries `tags` + `info` (like champion.json) PLUS `stats`,
+// which is the only place attackrange (→ Melee/Ranged) lives in one fetch.
 const championJsonUrl = (v: string) =>
-  `https://ddragon.leagueoflegends.com/cdn/${v}/data/en_US/champion.json`;
+  `https://ddragon.leagueoflegends.com/cdn/${v}/data/en_US/championFull.json`;
 
 const VALID_CLASSES = new Set<string>(CHAMP_CLASSES);
 
@@ -103,9 +113,22 @@ function damageFromInfo(attack: number, magic: number): DamageType {
   return "Hybrid";
 }
 
+// Melee champs sit at ~125–225 attackrange, ranged at ~425–650; nothing real
+// falls in 250–400, so 300 is a clean split. (Gnar/Jayce/Nidalee use their base
+// form's range from championFull.)
+function attackTypeFromRange(range: number): AttackType {
+  return (Number(range) || 0) >= 300 ? "Ranged" : "Melee";
+}
+
 function seedFallback(byNorm: Map<string, ChampInfo>, byClass: Map<ChampClass, string[]>) {
   for (const [id, [classes, damage]] of Object.entries(FALLBACK)) {
-    byNorm.set(normChamp(id), { classes, damage });
+    // No attackrange in the static fallback → approximate: Marksmen + pure Mages
+    // are ranged, everyone else melee. Only used in the rare ddragon-down path.
+    const attackType: AttackType =
+      classes.includes("Marksman") || (classes.includes("Mage") && !classes.includes("Assassin") && !classes.includes("Fighter") && !classes.includes("Tank"))
+        ? "Ranged"
+        : "Melee";
+    byNorm.set(normChamp(id), { classes, damage, attackType });
     for (const c of classes) byClass.get(c)!.push(id);
   }
 }
@@ -133,8 +156,9 @@ async function fetchDdragon(): Promise<void> {
       ) as ChampClass[];
       if (classes.length === 0) continue;
       const damage = damageFromInfo(c?.info?.attack, c?.info?.magic);
+      const attackType = attackTypeFromRange(c?.stats?.attackrange);
       const canonical = String(c?.id ?? id);
-      byNorm.set(normChamp(canonical), { classes, damage });
+      byNorm.set(normChamp(canonical), { classes, damage, attackType });
       for (const cls of classes) byClass.get(cls)!.push(canonical);
       count++;
     }
@@ -206,6 +230,43 @@ export function championsByDamage(dmg: DamageType): string[] {
     }
   }
   return out;
+}
+
+/** All champion_name ids whose attack type is `at` ("Melee"/"Ranged"). */
+export function championsByAttackType(at: AttackType): string[] {
+  if (!_byNorm) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const list of _byClass?.values() ?? []) {
+    for (const id of list) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (_byNorm.get(normChamp(id))?.attackType === at) out.push(id);
+    }
+  }
+  return out;
+}
+
+/** Attack type for a champion_name, or null if unknown / not yet loaded. */
+export function attackTypeOf(championName: string): AttackType | null {
+  return _byNorm?.get(normChamp(championName))?.attackType ?? null;
+}
+
+/**
+ * Unified resolver: canonical champion_name ids for ANY category — a roster class
+ * (Assassin…Tank), a damage profile (AD/AP), or an attack type (Melee/Ranged).
+ * Used by compile.ts (team-comp constraints) and itemStrength.ts (buckets).
+ */
+export function categoryMembers(category: string): string[] {
+  if ((CHAMP_CLASSES as string[]).includes(category)) return championsInClass(category as ChampClass);
+  if (category === "AD" || category === "AP") return championsByDamage(category);
+  if (category === "Melee" || category === "Ranged") return championsByAttackType(category);
+  return [];
+}
+
+/** True if `category` is a recognised champion category (class / AD / AP / Melee / Ranged). */
+export function isChampCategory(category: string): category is ChampCategory {
+  return (CHAMP_CATEGORIES as string[]).includes(category);
 }
 
 export const ALL_CHAMP_CLASSES = CHAMP_CLASSES;
