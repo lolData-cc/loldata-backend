@@ -154,6 +154,11 @@ setInterval(() => {
 import { startScoutPeriodicSweep } from "./services/scoutPeriodic";
 startScoutPeriodicSweep();
 
+// Regenerate the tier-list snapshot every night (nothing else ever did), so the
+// tier list reflects the latest box data instead of freezing on a stale date.
+import { startTierlistNightly } from "./services/tierlistPeriodic";
+startTierlistNightly();
+
 // Warm the champion class/damage map (Data Dragon) so the Explorer's category
 // filters + conditional item-strength analysis have data. Fire-and-forget; the
 // getters no-op safely until it's ready.
