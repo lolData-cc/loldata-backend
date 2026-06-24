@@ -26,6 +26,7 @@ import { getMatchTimelineHandler } from "./routes/getMatchTimeline"
 import { getItemStatsHandler } from "./routes/getItemStats"
 import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
+import { getChampionDuosHandler } from "./routes/getChampionDuos"
 import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
 import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler, debugScoutSnapshotsHandler } from "./routes/scout";
@@ -548,6 +549,10 @@ if (pathname === "/api/itembestutilizers" && req.method === "POST") {
 
 if (pathname === "/api/champion/matchups" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionMatchupsHandler);
+}
+
+if (pathname === "/api/champion/duos" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getChampionDuosHandler);
 }
 
 if (pathname === "/api/season_stats" && req.method === "POST") {
