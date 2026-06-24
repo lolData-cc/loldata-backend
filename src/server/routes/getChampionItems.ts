@@ -1,6 +1,6 @@
 // routes/getChampionItems.ts
 import { supabaseAdmin } from "../supabase/client"
-import { getSnap } from "./getChampionStats"
+import { getSnap, getChampRoles } from "./getChampionStats"
 
 type ItemRow = {
   item_id: number
@@ -27,10 +27,16 @@ export async function getChampionItemsHandler(req: Request): Promise<Response> {
       return new Response("Missing championName or championId", { status: 400 })
     }
 
-    // Try preloaded snapshot first (instant)
-    if (championId && role) {
-      const roleNorm = role === "SUPPORT" ? "UTILITY" : role
-      const snapData = getSnap(championId, roleNorm, tier ?? null)
+    // Try preloaded snapshot first (instant). Derive the champion's MAIN role when
+    // the caller didn't pass one (mirrors the stats handler) — otherwise the request
+    // falls through to the empty legacy RPC and the Build tab renders blank.
+    if (championId) {
+      let roleNorm = role ? (role === "SUPPORT" ? "UTILITY" : role) : null
+      if (!roleNorm) {
+        const roles = getChampRoles(championId)
+        if (roles.length) roleNorm = roles[0].role
+      }
+      const snapData = roleNorm ? getSnap(championId, roleNorm, tier ?? null) : null
       const items = snapData?.items as ItemRow[] | undefined
 
       if (items?.length) {

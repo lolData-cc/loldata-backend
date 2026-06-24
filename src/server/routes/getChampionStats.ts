@@ -39,7 +39,7 @@ export function getSnap(champId: number, role: string, tier: string | null) {
   return _snapCache.get(snapKey(champId, role, tier)) ?? null;
 }
 
-function getChampRoles(champId: number): { role: string; games: number }[] {
+export function getChampRoles(champId: number): { role: string; games: number }[] {
   const roles: { role: string; games: number }[] = [];
   for (const [key, data] of _snapCache.entries()) {
     if (key.startsWith(`${champId}:`) && key.endsWith(":ALL")) {
