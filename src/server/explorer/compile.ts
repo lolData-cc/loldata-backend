@@ -290,16 +290,29 @@ export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
     const j = [`r.match_id = s.match_id`, teamExpr];
     if (dim === "ally") j.push(`r.puuid <> s.puuid`);
     if (g.output.role && ROLES.has(g.output.role)) j.push(`r.role = ${P(g.output.role)}`);
-    const text = `${cteSql}
+    // Rank champions by a CONFIDENCE-WEIGHTED LIFT, not raw winrate — otherwise a
+    // 7-game off-meta pick at 85% buries the genuinely good, reliable partners (and
+    // the headline games count collapses to that handful). Same Bayesian shrinkage
+    // as the item branch: shrunk_wr regresses small samples toward the subject's
+    // baseline winrate (coh.b); log10(games) rewards proven, high-sample pairings.
+    // `cohort_games` (coh.n) is the FULL subject sample — surfaced so the UI shows
+    // "analyzed N games" instead of the sum of the few displayed rows.
+    const C = ITEM_PRIOR_C;
+    const text = `${cteSql},
+  coh AS (SELECT count(*)::int AS n, avg((s.win)::int) AS b FROM s ${outerWhere})
   SELECT r.champion_name AS dimension,
          count(*)::int AS games,
-         round(avg((s.win)::int) * 100, 2)::float8 AS winrate
+         round(avg((s.win)::int) * 100, 2)::float8 AS winrate,
+         round((avg((s.win)::int) - max(coh.b)) * 100, 2)::float8 AS lift,
+         round(max(coh.b) * 100, 2)::float8 AS baseline,
+         max(coh.n)::int AS cohort_games
   ${base}
   JOIN participants r ON ${j.join(" AND ")}
+  CROSS JOIN coh
   ${outerWhere}
   GROUP BY r.champion_name
   HAVING count(*) >= ${P(minGames)}
-  ORDER BY winrate DESC, games DESC
+  ORDER BY (((sum((s.win)::int) + ${C} * max(coh.b)) / (count(*) + ${C})) - max(coh.b)) * log(10, (1 + count(*))::numeric) DESC, games DESC
   LIMIT ${P(limit)}`;
     return { text, params, mode: scope };
   }
@@ -327,6 +340,7 @@ export function compile(g: ExplorerGraph, patchPrefix: string): CompiledQuery {
          round((avg((s.win)::int) - max(coh.b)) * 100, 2)::float8 AS lift,
          round(count(*)::numeric / nullif(max(coh.n), 0) * 100, 2)::float8 AS pickrate,
          round(max(coh.b) * 100, 2)::float8 AS baseline,
+         max(coh.n)::int AS cohort_games,
          round(
            (((sum((s.win)::int) + ${C} * max(coh.b)) / (count(*) + ${C})) - max(coh.b))
            * log(10, (1 + count(*))::numeric)

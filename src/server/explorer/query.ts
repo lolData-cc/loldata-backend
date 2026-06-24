@@ -39,7 +39,9 @@ export async function explorerQueryHandler(req: Request): Promise<Response> {
     const games =
       graph.output.kind === "stats"
         ? Number((rows[0] as any)?.games ?? 0)
-        : rows.reduce((sum, x: any) => sum + Number(x.games ?? 0), 0);
+        // rankings: report the cohort total (ALL subject games), not the sum of the
+        // few displayed rows — that made a top-5 support list read as "48 games".
+        : Number((rows[0] as any)?.cohort_games) || rows.reduce((sum, x: any) => sum + Number(x.games ?? 0), 0);
 
     return Response.json({ columns, rows, meta: { games, ms, mode, patch } });
   } catch (e: any) {
