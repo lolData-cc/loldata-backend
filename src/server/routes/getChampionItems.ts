@@ -30,7 +30,7 @@ export async function getChampionItemsHandler(req: Request): Promise<Response> {
     // Try preloaded snapshot first (instant). Derive the champion's MAIN role when
     // the caller didn't pass one (mirrors the stats handler) — otherwise the request
     // falls through to the empty legacy RPC and the Build tab renders blank.
-    if (championId) {
+    if (championId && !wantBuildOrder) {
       let roleNorm = role ? (role === "SUPPORT" ? "UTILITY" : role) : null
       if (!roleNorm) {
         const roles = getChampRoles(championId)
