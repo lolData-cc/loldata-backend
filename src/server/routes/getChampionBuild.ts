@@ -42,7 +42,6 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
 
     const allItems = (snap?.items ?? []) as SnapItem[]
     const g = (i: SnapItem) => Number(i.total_games ?? i.games ?? 0)
-    const boots = allItems.filter((i) => BOOTS.has(i.item_id)).slice(0, 3)
     const legendaries = allItems.filter((i) => !BOOTS.has(i.item_id))
     const coreItems = legendaries.slice(0, 6) // snapshot is ordered by pick rate
     const coreIds = new Set(coreItems.slice(0, 3).map((i) => i.item_id))
@@ -60,20 +59,26 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       games: Number(r.games ?? 0),
     }))
 
-    // live: summoner spells (top pairs) + top players
+    // live: summoner spells (top pairs) + boots + top players
     let spells: any[] = []
+    let bootsRows: any[] = []
     let topPlayers: any[] = []
     const client = await explorerPool().connect()
     try {
-      await client.query("SET statement_timeout = 12000")
+      await client.query("SET statement_timeout = 15000")
       const sp = await client.query(
-        `SELECT least(summoner1_id, summoner2_id) AS s1,
-                greatest(summoner1_id, summoner2_id) AS s2,
-                count(*)::int AS games,
-                round(avg((win)::int) * 100, 2)::float8 AS winrate
-         FROM participants
-         WHERE champion_name = $1 AND summoner1_id IS NOT NULL AND summoner2_id IS NOT NULL
-         GROUP BY 1, 2 ORDER BY games DESC LIMIT 3`,
+        `SELECT s1, s2, games, winrate,
+                round(games::numeric / nullif(sum(games) over (), 0) * 100, 1)::float8 AS pickrate
+         FROM (
+           SELECT least(summoner1_id, summoner2_id) AS s1,
+                  greatest(summoner1_id, summoner2_id) AS s2,
+                  count(*)::int AS games,
+                  round(avg((win)::int) * 100, 2)::float8 AS winrate
+           FROM participants
+           WHERE champion_name = $1 AND summoner1_id IS NOT NULL AND summoner2_id IS NOT NULL
+           GROUP BY 1, 2
+         ) t
+         ORDER BY games DESC LIMIT 3`,
         [champion]
       )
       spells = sp.rows.map((r: any) => ({
@@ -81,8 +86,20 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
         spell2: Number(r.s2),
         games: Number(r.games),
         winrate: Number(r.winrate),
-        pickrate: cohort ? Math.round((Number(r.games) / cohort) * 1000) / 10 : null,
+        pickrate: r.pickrate != null ? Number(r.pickrate) : null,
       }))
+
+      const bt = await client.query(
+        `SELECT item, count(*)::int AS games, round(avg((win)::int) * 100, 2)::float8 AS winrate
+         FROM (
+           SELECT unnest(ARRAY[item0,item1,item2,item3,item4,item5,item6]) AS item, win
+           FROM participants WHERE champion_name = $1
+         ) t
+         WHERE item = ANY($2::int[])
+         GROUP BY item ORDER BY games DESC LIMIT 3`,
+        [champion, [...BOOTS]]
+      )
+      bootsRows = bt.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate) }))
 
       const tp = await client.query(
         `SELECT riot_id_game_name AS name, riot_id_tagline AS tag,
@@ -121,7 +138,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
         : null,
       runes,
       spells,
-      items: { boots, core: coreItems, situational },
+      items: { boots: bootsRows, core: coreItems, situational },
       topPlayers,
     }
     cache.set(champKey, { ts: Date.now(), payload })
