@@ -27,6 +27,7 @@ import { getItemStatsHandler } from "./routes/getItemStats"
 import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
 import { getChampionDuosHandler } from "./routes/getChampionDuos"
+import { aiChatHandler, aiHistoryHandler } from "./routes/aiChat"
 import { getChampionBuildHandler } from "./routes/getChampionBuild"
 import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
@@ -554,6 +555,14 @@ if (pathname === "/api/champion/matchups" && req.method === "POST") {
 
 if (pathname === "/api/champion/duos" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionDuosHandler);
+}
+
+if (pathname === "/api/ai/chat" && req.method === "POST") {
+  return withLogAndCors(req, pathname, aiChatHandler);
+}
+
+if (pathname === "/api/ai/history" && (req.method === "GET" || req.method === "DELETE")) {
+  return withLogAndCors(req, pathname, aiHistoryHandler);
 }
 
 if (pathname === "/api/champion/build" && req.method === "POST") {
