@@ -143,11 +143,12 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       if (role) {
         const [pageR, slotR, bpR] = await Promise.all([
           client.query(
-            `SELECT perk_keystone AS keystone, perk_primary, perk_secondary, stat_perks,
+            `SELECT perk_keystone AS keystone, perk_primary_style AS primary_style, perk_sub_style AS sub_style,
+                    perk_primary, perk_secondary, stat_perks,
                     count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
              FROM participants
-             WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL
-             GROUP BY 1, 2, 3, 4 ORDER BY games DESC LIMIT 1`,
+             WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL AND perk_primary_style IS NOT NULL
+             GROUP BY 1, 2, 3, 4, 5, 6 ORDER BY games DESC LIMIT 5`,
             [champion, role]
           ),
           client.query(
@@ -177,8 +178,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
           ),
         ])
 
-        const top = pageR.rows[0]
-        if (top) {
+        if (pageR.rows.length > 0) {
           const bySlot = new Map<string, { perk: number; games: number; winrate: number }[]>()
           for (const r of slotR.rows as any[]) {
             const k = String(r.slot)
@@ -189,16 +189,21 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
           const sample = (slotR.rows as any[])
             .filter((r) => r.slot === "P1")
             .reduce((s, r) => s + Number(r.games), 0)
+          // top N full pages → the "recommended builds" variant list; each renders
+          // as a standard LoL rune page on the front end.
+          const pages = (pageR.rows as any[]).map((p) => ({
+            keystone: Number(p.keystone),
+            primaryStyle: Number(p.primary_style),
+            subStyle: Number(p.sub_style),
+            primary: (p.perk_primary as number[]) ?? [],
+            secondary: (p.perk_secondary as number[]) ?? [],
+            shards: (p.stat_perks as number[]) ?? [],
+            games: Number(p.games),
+            winrate: Number(p.winrate),
+          }))
           preciseRunes = {
             sample,
-            page: {
-              keystone: Number(top.keystone),
-              primary: (top.perk_primary as number[]) ?? [],
-              secondary: (top.perk_secondary as number[]) ?? [],
-              shards: (top.stat_perks as number[]) ?? [],
-              games: Number(top.games),
-              winrate: Number(top.winrate),
-            },
+            pages,
             slots: [...bySlot.entries()].map(([slot, options]) => ({ slot, options })),
           }
         }
