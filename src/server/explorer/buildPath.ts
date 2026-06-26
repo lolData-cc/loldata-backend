@@ -56,15 +56,6 @@ type Row = {
   covered: number;
 };
 
-/** The completed-item pool to order purchases by. Prefer the slot pool the frontend
- *  ships (legendary, no boots); fall back to the rank itemPool, then "any item". */
-function poolFrom(g: ExplorerGraph): number[] {
-  const a = (g.itemPool ?? []) as number[];
-  const b = g.output?.kind === "rank" ? (g.output.itemPool ?? []) : [];
-  const src = a.length ? a : b;
-  return src.map((n) => Number(n) | 0).filter((n) => n > 0);
-}
-
 export async function buildPath(
   g: ExplorerGraph,
   patchPrefix: string,
@@ -82,12 +73,10 @@ export async function buildPath(
     scope === "all" ? { kind: "all" } : { kind: "current", patch: patchPrefix }
   );
 
-  const pool = poolFrom(g);
-  const poolCond = pool.length ? `AND e.item_id = ANY(${P(pool)})` : "AND e.item_id <> 0";
-
   // `sf` = the fully-filtered subject cohort; `seq` = each player's ordered completed
-  // purchases as an array; we unnest WITH ORDINALITY to get (item, slot); group by
-  // (slot, item). coh/cov carry the baseline + coverage as constants on every row.
+  // legendary build as an int[] (legendary_order, filled at ingest); we unnest WITH
+  // ORDINALITY to get (item, slot); group by (slot, item). coh/cov carry the
+  // baseline + coverage as constants on every row.
   const text = `${cteSql},
   sf AS (
     SELECT s.match_id, s.participant_id, (s.win)::int AS win
@@ -96,12 +85,8 @@ export async function buildPath(
   ),
   seq AS (
     SELECT sf.win,
-           (SELECT array_agg(e.item_id ORDER BY e.ts_ms)
-            FROM participant_item_events e
-            WHERE e.match_id = sf.match_id
-              AND e.participant_id = sf.participant_id
-              AND e.event_type = 'PURCHASE'
-              ${poolCond}) AS items
+           (SELECT p.legendary_order FROM participants p
+            WHERE p.match_id = sf.match_id AND p.participant_id = sf.participant_id) AS items
     FROM sf
   ),
   coh AS (SELECT count(*)::int AS n, avg(win)::numeric AS b FROM sf),

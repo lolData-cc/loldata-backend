@@ -108,13 +108,10 @@ export function buildCohort(g: ExplorerGraph, P: (v: unknown) => string, scope: 
     return `(${a}item0=${ph} OR ${a}item1=${ph} OR ${a}item2=${ph} OR ${a}item3=${ph} OR ${a}item4=${ph} OR ${a}item5=${ph} OR ${a}item6=${ph})`;
   };
 
-  // Build-slot constraint: "<alias> bought item X as its Nth COMPLETED item".
-  // Windowed over the player's ITEM_PURCHASED timeline events, restricted to the
-  // completed-item pool so component purchases (Long Sword, etc.) don't count as
-  // slots. Only matches WITH timeline data (participant_item_events) qualify — so
-  // a slot filter narrows the sample to timeline-covered games. Falls back to
-  // ordering all purchases if no pool was shipped.
-  const itemPool = (g.itemPool ?? []).map((n) => Number(n) | 0).filter((n) => n > 0);
+  // Build-slot constraint: "<alias> built item X as its Nth completed legendary".
+  // Reads the precomputed ordered legendary_order int[] on participants (filled at
+  // ingest: legendaries + Dark Seal/Mejai in completion order) — a cheap array
+  // index, no subquery over the (now retired) participant_item_events table.
   const slotOf = (spec: ChampSpec | Constraint | undefined, itemId: number): number => {
     const n = Number(spec?.itemSlots?.[String(itemId)]) | 0;
     return n >= 1 && n <= 6 ? n : 0;
@@ -128,11 +125,7 @@ export function buildCohort(g: ExplorerGraph, P: (v: unknown) => string, scope: 
   // CTE table `participants`; ally/enemy = the EXISTS alias x.
   const slotItem = (alias: string, itemId: number, slot: number) => {
     const corr = alias ? `${alias}.` : "participants.";
-    const poolCond = itemPool.length ? `AND e.item_id = ANY(${P(itemPool)})` : "AND e.item_id <> 0";
-    return `(SELECT e.item_id FROM participant_item_events e
-      WHERE e.match_id = ${corr}match_id AND e.participant_id = ${corr}participant_id
-        AND e.event_type = 'PURCHASE' ${poolCond}
-      ORDER BY e.ts_ms OFFSET ${P(Math.max(0, slot - 1))} LIMIT 1) = ${P(Number(itemId) | 0)}`;
+    return `${corr}legendary_order[${P(Math.max(1, slot))}] = ${P(Number(itemId) | 0)}`;
   };
 
   // ── subject CTE filters (on `participants`, index-friendly) ──

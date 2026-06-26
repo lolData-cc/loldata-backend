@@ -3,6 +3,7 @@ import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // mat
 import { explorerPool } from "../explorer/pool"; // raw pg for the patch/region filter path
 type ChampionStatsBody = {
   championId?: number | string;
+  champion?: string | null; // DDragon name — needed for the live patch/region path
   patch?: string | null;
   region?: string | null;
   queueId?: number | null;
