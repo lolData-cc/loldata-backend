@@ -197,6 +197,39 @@ async function getChampionAggregate(champNum: number): Promise<HeroAgg | null> {
     client.release();
   }
 }
+
+// ── champion's current meta TIER (primary role) from the latest tier-list
+// snapshot (region ALL). The tier list is per-role; the hero shows the tier in
+// the champion's most-played role. Cached 5 min. ──────────────
+type ChampTier = { tier: string; tierRank: number; role: string; patch: string | null };
+const _tierCache = new Map<number, { value: ChampTier | null; exp: number }>();
+async function getChampionTier(champNum: number): Promise<ChampTier | null> {
+  const hit = _tierCache.get(champNum);
+  if (hit && Date.now() < hit.exp) return hit.value;
+  const client = await explorerPool().connect();
+  try {
+    await client.query("SET statement_timeout = 8000");
+    const r = await client.query(
+      `SELECT tier, tier_rank, role, patch
+         FROM tierlist_snapshots
+        WHERE champion_id = $1 AND region = 'ALL'
+          AND snapshot_date = (SELECT max(snapshot_date) FROM tierlist_snapshots WHERE region = 'ALL')
+        ORDER BY games DESC
+        LIMIT 1`,
+      [champNum],
+    );
+    const row = r.rows?.[0];
+    const value: ChampTier | null = row
+      ? { tier: String(row.tier), tierRank: Number(row.tier_rank), role: String(row.role), patch: row.patch ? String(row.patch) : null }
+      : null;
+    _tierCache.set(champNum, { value, exp: Date.now() + 300_000 });
+    return value;
+  } catch {
+    return null;
+  } finally {
+    client.release();
+  }
+}
 // ── Live patch/region filter path ───────────────────────────────────
 // The precomputed snapshots have NO patch/region dimension, and the legacy
 // get_champion_stats_full RPC ignores those params (and is heavy → 500s). So when
@@ -369,11 +402,11 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
         if (snapData) {
           const ms = Date.now() - t0;
           // Hero stats = live aggregate across ALL roles (not just this snapshot's
-          // primary-role sample). Additive: existing snapshot fields untouched.
-          const agg = await getChampionAggregate(champNum);
-          const out = agg
-            ? { ...snapData, totalGames: agg.games, totalWinrate: agg.winrate, totalPickrate: agg.pickrate, totalKda: agg.kda }
-            : snapData;
+          // primary-role sample) + current meta tier. Additive: snapshot untouched.
+          const [agg, mtier] = await Promise.all([getChampionAggregate(champNum), getChampionTier(champNum)]);
+          const out: any = { ...snapData };
+          if (agg) { out.totalGames = agg.games; out.totalWinrate = agg.winrate; out.totalPickrate = agg.pickrate; out.totalKda = agg.kda; }
+          if (mtier) { out.metaTier = mtier.tier; out.metaTierRank = mtier.tierRank; out.metaTierRole = mtier.role; out.metaTierPatch = mtier.patch; }
           console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm: effectiveRole, tier: tier ?? "ALL" });
           cacheSet(cacheKey, out);
           return Response.json(out, {

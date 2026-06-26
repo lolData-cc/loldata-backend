@@ -2,6 +2,7 @@
 // Generates daily tier list snapshots (per-region) and serves them via API.
 
 import { supabaseMatchAdmin as supabaseAdmin } from "../supabase/client"; // match data → box (hybrid)
+import { explorerPool } from "../explorer/pool"; // raw pg for the patch-scoped aggregation
 
 const ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"] as const;
 const SNAPSHOT_REGIONS = ["ALL", "EUW", "NA", "KR"] as const;
@@ -53,71 +54,56 @@ export async function generateSnapshotHandler(req: Request): Promise<Response> {
 
     console.log(`📊 Generating tier list snapshot for patch ${patch}, date ${today}`);
 
-    // Use DB-side aggregation instead of fetching all rows into memory
-    const { data: aggRows, error: aggErr } = await supabaseAdmin.rpc("aggregate_tierlist_data");
-
-    // If the RPC doesn't exist, fall back to a raw query approach
-    let rows: { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }[];
-
-    if (aggErr || !aggRows) {
-      console.log("RPC not available, using direct participants aggregation...");
-
-      {
-        // Aggregate directly from participants table (skip stale materialized view)
-        rows = [];
-        const PAGE_SIZE = 50000;
-        let offset = 0;
-        const agg = new Map<string, { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }>();
-
-        while (true) {
-          const { data: page, error: pgErr } = await supabaseAdmin
-            .from("participants")
-            .select("match_id, champion_id, champion_name, role, win")
-            .not("role", "is", null)
-            .not("role", "eq", "")
-            .range(offset, offset + PAGE_SIZE - 1);
-
-          if (pgErr) {
-            console.error("❌ Participants query error:", pgErr.message);
-            break;
-          }
-          if (!page?.length) {
-            console.log(`  No more rows at offset ${offset}`);
-            break;
-          }
-          console.log(`  Fetched ${page.length} rows at offset ${offset}`);
-
-          for (const p of page) {
-            const role = normalizeRole(p.role);
-            if (!role) continue;
-            const mr = matchRegion(p.match_id);
-
-            // Per-region
-            if (["EUW", "NA", "KR"].includes(mr)) {
-              const key = `${mr}:${p.champion_id}:${role}`;
-              let e = agg.get(key);
-              if (!e) { e = { champion_id: p.champion_id, champion_name: p.champion_name, role, region: mr, games: 0, wins: 0 }; agg.set(key, e); }
-              e.games++;
-              if (p.win) e.wins++;
-            }
-
-            // Global
-            const gKey = `ALL:${p.champion_id}:${role}`;
-            let ge = agg.get(gKey);
-            if (!ge) { ge = { champion_id: p.champion_id, champion_name: p.champion_name, role, region: "ALL", games: 0, wins: 0 }; agg.set(gKey, ge); }
-            ge.games++;
-            if (p.win) ge.wins++;
-          }
-
-          if (page.length < PAGE_SIZE) break;
-          offset += PAGE_SIZE;
-          console.log(`  ... processed ${offset} participants`);
+    // Aggregate the CURRENT PATCH only, directly in Postgres via the raw pool.
+    // The old all-window RPC scanned 34M+ participant rows and timed out through
+    // PostgREST — which is why the snapshot froze at 16.12. Patch-scoped is both
+    // correct for a "current meta" tier list and fast (~1-2s). Region derives from
+    // matches.platform; the ALL region is the sum across every region per champ×role.
+    let rows: { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }[] = [];
+    {
+      const client = await explorerPool().connect();
+      try {
+        await client.query("SET statement_timeout = 60000");
+        const res = await client.query(
+          `SELECT p.champion_id,
+                  max(p.champion_name) AS champion_name,
+                  p.role,
+                  CASE
+                    WHEN m.platform IN ('euw1','euw') THEN 'EUW'
+                    WHEN m.platform IN ('na1','na')   THEN 'NA'
+                    WHEN m.platform = 'kr'            THEN 'KR'
+                    ELSE 'OTHER'
+                  END AS region,
+                  count(*)::int          AS games,
+                  sum((p.win)::int)::int AS wins
+           FROM participants p
+           JOIN matches m ON m.match_id = p.match_id
+           WHERE m.patch = $1
+             AND p.role IN ('TOP','JUNGLE','MIDDLE','BOTTOM','UTILITY')
+           GROUP BY p.champion_id, p.role, region`,
+          [patch],
+        );
+        const perRegion: { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }[] = res.rows.map((r: any) => ({
+          champion_id: Number(r.champion_id),
+          champion_name: r.champion_name as string,
+          role: r.role as string,
+          region: r.region as string,
+          games: Number(r.games),
+          wins: Number(r.wins),
+        }));
+        // ALL region = sum across every region (incl. OTHER) per champ×role.
+        const allMap = new Map<string, { champion_id: number; champion_name: string; role: string; region: string; games: number; wins: number }>();
+        for (const r of perRegion) {
+          const k = `${r.champion_id}:${r.role}`;
+          let e = allMap.get(k);
+          if (!e) { e = { champion_id: r.champion_id, champion_name: r.champion_name, role: r.role, region: "ALL", games: 0, wins: 0 }; allMap.set(k, e); }
+          e.games += r.games; e.wins += r.wins;
         }
-
-        rows = Array.from(agg.values());
+        // Keep EUW/NA/KR (drop standalone OTHER) + the synthesized ALL rows.
+        rows = [...perRegion.filter(r => r.region !== "OTHER"), ...Array.from(allMap.values())];
+      } finally {
+        client.release();
       }
-    } else {
-      rows = aggRows as any[];
     }
 
     console.log(`📦 Aggregated ${rows.length} champion-role entries`);
