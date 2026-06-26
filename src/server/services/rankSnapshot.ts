@@ -96,6 +96,29 @@ export async function writeRankSnapshot(
   // opportunistic lobby-read snapshot, refresh endpoints, post-match hook).
   if (process.env.BOX_READ_ONLY === "true") return;
   const tag = puuid.slice(0, 8);
+
+  // Pre-fetch dedup — skip the league-v4 Riot call ENTIRELY if we already
+  // snapshotted this puuid within the dedup window. Snapshots for solo + flex
+  // are written together in one call, so a recent row means both queues are
+  // already current. Without this, the per-queue dedup further down still ran
+  // the (wasted) Riot fetch on every call — which is what stormed league-v4
+  // when many scout lobby reads / the periodic sweep hit the same accounts.
+  {
+    const { data: recent } = await supabaseAdmin
+      .from("scout_rank_snapshots")
+      .select("taken_at")
+      .eq("puuid", puuid)
+      .order("taken_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (
+      recent?.taken_at &&
+      Date.now() - new Date(recent.taken_at).getTime() < DEDUPE_WINDOW_MS
+    ) {
+      return;
+    }
+  }
+
   let entries: any[];
   try {
     entries = await getRankedDataBySummonerId(puuid, region);
