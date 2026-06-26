@@ -107,16 +107,21 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       }))
 
       const bt = await client.query(
-        `SELECT item, count(*)::int AS games, round(avg((win)::int) * 100, 2)::float8 AS winrate
+        `SELECT item, games, winrate,
+                round(games::numeric / nullif(sum(games) over (), 0) * 100, 1)::float8 AS pickrate
          FROM (
-           SELECT unnest(ARRAY[item0,item1,item2,item3,item4,item5,item6]) AS item, win
-           FROM participants WHERE champion_name = $1
+           SELECT item, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
+           FROM (
+             SELECT unnest(ARRAY[item0,item1,item2,item3,item4,item5,item6]) AS item, win
+             FROM participants WHERE champion_name = $1 AND ($3::text IS NULL OR role = $3)
+           ) u
+           WHERE item = ANY($2::int[])
+           GROUP BY item
          ) t
-         WHERE item = ANY($2::int[])
-         GROUP BY item ORDER BY games DESC LIMIT 3`,
-        [champion, [...BOOTS]]
+         ORDER BY games DESC LIMIT 4`,
+        [champion, [...BOOTS], role]
       )
-      bootsRows = bt.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate) }))
+      bootsRows = bt.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate), pickrate: r.pickrate != null ? Number(r.pickrate) : null }))
 
       const tp = await client.query(
         `SELECT riot_id_game_name AS name, riot_id_tagline AS tag,
