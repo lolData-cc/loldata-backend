@@ -7,6 +7,10 @@ const regionRouting = {
         account: "europe.api.riotgames.com",
         platform: "euw1.api.riotgames.com"
     },
+    EUNE: {
+        account: "europe.api.riotgames.com",
+        platform: "eun1.api.riotgames.com"
+    },
     NA: {
         account: "americas.api.riotgames.com",
         platform: "na1.api.riotgames.com"

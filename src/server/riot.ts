@@ -35,6 +35,11 @@ const regionRouting = {
     match: "europe.api.riotgames.com",
     platform: "euw1.api.riotgames.com",
   },
+  EUNE: {
+    account: "europe.api.riotgames.com",
+    match: "europe.api.riotgames.com",
+    platform: "eun1.api.riotgames.com",
+  },
   NA: {
     account: "americas.api.riotgames.com",
     match: "americas.api.riotgames.com",
