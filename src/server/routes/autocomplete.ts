@@ -10,6 +10,9 @@ type Suggestion = {
   icon_id: number | null
   rank: string | null
   region: string
+  // Custom uploaded profile pic (premium). When set, the frontend shows it
+  // instead of the LoL profile icon. Enriched from `profile_players` below.
+  avatar_url?: string | null
 }
 
 export async function autocompleteHandler(req: Request): Promise<Response> {
@@ -171,7 +174,35 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
     }
   }
 
-  return Response.json({ results: results.slice(0, 8) })
+  const finalResults = results.slice(0, 8)
+
+  // Premium uploaded profile pics — show the player's own avatar instead of the
+  // LoL icon. One batched lookup in `profile_players` by `nametag` ("Name#Tag"),
+  // case-insensitive. Best-effort: on any error we just fall back to the icon.
+  try {
+    const nametags = finalResults.map((r) => `${r.name}#${r.tag}`)
+    if (nametags.length) {
+      const { data: profRows } = await supabaseAdmin
+        .from("profile_players")
+        .select("nametag, avatar_url")
+        .in("nametag", nametags)
+        .not("avatar_url", "is", null)
+      if (profRows?.length) {
+        const avatarMap = new Map<string, string>()
+        for (const p of profRows) {
+          if (p.nametag && p.avatar_url) avatarMap.set(String(p.nametag).toLowerCase(), p.avatar_url)
+        }
+        for (const r of finalResults) {
+          const a = avatarMap.get(`${r.name}#${r.tag}`.toLowerCase())
+          if (a) r.avatar_url = a
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("autocomplete avatar enrichment failed:", (e as any)?.message ?? e)
+  }
+
+  return Response.json({ results: finalResults })
 }
 
 // ─── helpers ────────────────────────────────────────────────────────
@@ -183,6 +214,7 @@ function scoutRowToSuggestion(row: any): Suggestion {
     icon_id: null,
     rank: null,
     region: row.region,
+    avatar_url: null,
   }
 }
 
@@ -193,6 +225,7 @@ function playerRowToSuggestion(row: any): Suggestion {
     icon_id: row.icon_id ?? null,
     rank: row.tier ?? null,
     region: platformToRegion(row.platform),
+    avatar_url: null,
   }
 }
 

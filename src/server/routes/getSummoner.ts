@@ -308,7 +308,13 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       peak_flex_lp:   peakFlexLP,
       last_searched_at: new Date().toISOString(),
       region: region.toUpperCase(),
-    }, { onConflict: 'name,tag' })
+      // onConflict MUST be a real UNIQUE constraint. `users` has UNIQUE(puuid)
+      // (users_puuid_unique) but only a NON-unique index on (name,tag), so the
+      // old `onConflict:'name,tag'` failed every time ("no unique or exclusion
+      // constraint matching the ON CONFLICT specification") → rank/last_searched_at
+      // were NEVER updated and the autocomplete showed stale ranks forever.
+      // puuid is the stable identity (survives name changes) → upsert by it.
+    }, { onConflict: 'puuid' })
     if (error) console.error("❌ Errore salvataggio Supabase:", error.message)
 
     // Fire ingestion in background for DB population (season stats).
