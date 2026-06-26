@@ -128,6 +128,32 @@ async function getLatestPatch(): Promise<string | null> {
   }
   return null;
 }
+
+// ── live TOTAL games for a champion (all roles / queues / patches in the box),
+// cached briefly. The default snapshot path only knows the per-role sample
+// (e.g. mid = 4.2k) from the nightly rebuild, which badly undercounts a fresh,
+// heavily-played champion. This is the same count the Explorer reports, so the
+// hero "Games" stat matches reality. Index-only scan on idx_participants_champion.
+const _totalGamesCache = new Map<number, { value: number; exp: number }>();
+async function getChampionTotalGames(champNum: number): Promise<number | null> {
+  const hit = _totalGamesCache.get(champNum);
+  if (hit && Date.now() < hit.exp) return hit.value;
+  const client = await explorerPool().connect();
+  try {
+    await client.query("SET statement_timeout = 8000");
+    const r = await client.query(
+      `SELECT count(*)::int AS games FROM participants WHERE champion_id = $1`,
+      [champNum],
+    );
+    const games = Number(r.rows?.[0]?.games ?? 0);
+    _totalGamesCache.set(champNum, { value: games, exp: Date.now() + 300_000 }); // 5 min
+    return games;
+  } catch {
+    return null; // never break the stats response over the headline count
+  } finally {
+    client.release();
+  }
+}
 // ── Live patch/region filter path ───────────────────────────────────
 // The precomputed snapshots have NO patch/region dimension, and the legacy
 // get_champion_stats_full RPC ignores those params (and is heavy → 500s). So when
@@ -299,9 +325,13 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
         const snapData = getSnap(champNum, effectiveRole, tier ?? null);
         if (snapData) {
           const ms = Date.now() - t0;
+          // Headline "Games" = live total across ALL roles (not just this
+          // snapshot's primary-role sample). Additive: existing fields untouched.
+          const totalGames = await getChampionTotalGames(champNum);
+          const out = totalGames != null ? { ...snapData, totalGames } : snapData;
           console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm: effectiveRole, tier: tier ?? "ALL" });
-          cacheSet(cacheKey, snapData);
-          return Response.json(snapData, {
+          cacheSet(cacheKey, out);
+          return Response.json(out, {
             headers: {
               "x-cache": "SNAPSHOT",
               "x-request-id": requestId,
