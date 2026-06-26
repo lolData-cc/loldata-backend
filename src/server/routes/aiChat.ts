@@ -49,7 +49,7 @@ WHAT YOU CAN DO — READ-ONLY
 
 HOW YOU WORK
 - Pick the tool(s) that answer the question, call them, then write the answer from what they return. You may call several.
-- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves).
+- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_runes = best keystones + rune trees for a champion (use for any keystone/rune question). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves).
 
 THE SITE — route people to it
 - Champion page (/champions/<name>): build, duos, counters, statistics, and a "pros" tab = the ranked one-trick list.
@@ -119,7 +119,7 @@ async function deriveActions(log: { name: string; input: any }[], ctx: UserConte
     }
   };
 
-  const CHAMP_TOOLS = new Set(["champion_overview", "best_items", "best_teammates", "matchups", "champion_top_players"]);
+  const CHAMP_TOOLS = new Set(["champion_overview", "best_items", "best_runes", "best_teammates", "matchups", "champion_top_players"]);
   let champ: string | null = null;
   let topPlayers = false;
   let myPerf = false;

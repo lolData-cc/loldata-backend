@@ -147,6 +147,19 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "best_runes",
+    description:
+      "The best runes for a champion: the most-used and highest-winrate KEYSTONES (e.g. Conqueror, Electrocute, Press the Attack, Grasp of the Undying) plus the dominant primary+secondary rune trees, from ranked games. Optionally for a specific role. This is the right tool for 'best keystone for X', 'what runes does X run', 'best runes for X jungle'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        champion: { type: "string" },
+        role: { type: "string", enum: ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"], description: "Optional role (BOTTOM = ADC, UTILITY = support)." },
+      },
+      required: ["champion"],
+    },
+  },
+  {
     name: "best_teammates",
     description:
       "Best duo partners / teammates for a champion, ranked by how much they raise its winrate. For an ADC this returns the best supports; for a support, the best ADCs; otherwise best teammates overall. Use for 'best support for X', 'who should X duo with'.",
@@ -208,6 +221,8 @@ export function makeExecutor(
         return bestItems(input);
       case "best_teammates":
         return bestTeammates(input);
+      case "best_runes":
+        return bestRunes(input);
       case "matchups":
         return matchups(input);
       case "champion_top_players":
@@ -260,6 +275,64 @@ async function championTopPlayers(input: any) {
           href: summonerHref(x.name, x.tag, region),
         };
       }),
+    };
+  } finally {
+    client.release();
+  }
+}
+
+// Keystone + style id → display name (fixed set, rarely changes — no DDragon fetch).
+const KEYSTONE_NAME: Record<number, string> = {
+  8005: "Press the Attack", 8008: "Lethal Tempo", 8021: "Fleet Footwork", 8010: "Conqueror",
+  8112: "Electrocute", 8124: "Predator", 8128: "Dark Harvest", 9923: "Hail of Blades",
+  8214: "Summon Aery", 8229: "Arcane Comet", 8230: "Phase Rush",
+  8437: "Grasp of the Undying", 8439: "Aftershock", 8465: "Guardian",
+  8351: "Glacial Augment", 8360: "Unsealed Spellbook", 8369: "First Strike",
+};
+const STYLE_NAME: Record<number, string> = {
+  8000: "Precision", 8100: "Domination", 8200: "Sorcery", 8300: "Inspiration", 8400: "Resolve",
+};
+
+async function bestRunes(input: any) {
+  const champ = await resolveChamp(String(input?.champion ?? ""));
+  if (!champ) return { error: "unknown_champion", champion: input?.champion };
+  const role = normRole(input?.role);
+  const client = await explorerPool().connect();
+  try {
+    await client.query("SET statement_timeout = 12000");
+    const ks = await client.query(
+      `SELECT p.perk_keystone AS k, count(*)::int AS games,
+              round(avg((p.win)::int) * 100, 1)::float8 AS winrate
+         FROM participants p JOIN matches m ON m.match_id = p.match_id
+        WHERE p.champion_name = $1 AND m.queue_id = ANY($2) AND p.perk_keystone IS NOT NULL
+          ${role ? "AND p.role = $3" : ""}
+        GROUP BY p.perk_keystone
+        ORDER BY games DESC LIMIT 5`,
+      role ? [champ, QUEUES, role] : [champ, QUEUES]
+    );
+    if (!ks.rows.length) return { champion: champ, role: role ?? "main role", note: "Not enough games to rank keystones." };
+    const total = ks.rows.reduce((s: number, r: any) => s + Number(r.games), 0) || 1;
+    const tree = await client.query(
+      `SELECT p.perk_primary_style AS prim, p.perk_sub_style AS sub, count(*)::int AS games
+         FROM participants p JOIN matches m ON m.match_id = p.match_id
+        WHERE p.champion_name = $1 AND m.queue_id = ANY($2) AND p.perk_primary_style IS NOT NULL
+          ${role ? "AND p.role = $3" : ""}
+        GROUP BY p.perk_primary_style, p.perk_sub_style
+        ORDER BY games DESC LIMIT 1`,
+      role ? [champ, QUEUES, role] : [champ, QUEUES]
+    );
+    const t = tree.rows[0];
+    return {
+      champion: champ,
+      role: role ?? "main role",
+      keystones: ks.rows.map((r: any) => ({
+        keystone: KEYSTONE_NAME[Number(r.k)] ?? `keystone ${r.k}`,
+        winrate: `${Number(r.winrate).toFixed(1)}%`,
+        pickrate: `${((Number(r.games) / total) * 100).toFixed(0)}%`,
+        games: Number(r.games),
+      })),
+      most_common_trees: t ? `${STYLE_NAME[Number(t.prim)] ?? t.prim} (primary) + ${STYLE_NAME[Number(t.sub)] ?? t.sub} (secondary)` : null,
+      hint: "Lead with the highest-pickrate keystone as the default pick; call out a notably higher-winrate alternative if one stands out.",
     };
   } finally {
     client.release();
