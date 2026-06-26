@@ -129,27 +129,70 @@ async function getLatestPatch(): Promise<string | null> {
   return null;
 }
 
-// ── live TOTAL games for a champion (all roles / queues / patches in the box),
-// cached briefly. The default snapshot path only knows the per-role sample
-// (e.g. mid = 4.2k) from the nightly rebuild, which badly undercounts a fresh,
-// heavily-played champion. This is the same count the Explorer reports, so the
-// hero "Games" stat matches reality. Index-only scan on idx_participants_champion.
-const _totalGamesCache = new Map<number, { value: number; exp: number }>();
-async function getChampionTotalGames(champNum: number): Promise<number | null> {
-  const hit = _totalGamesCache.get(champNum);
+// ── live AGGREGATE hero stats for a champion, cached briefly. The default
+// snapshot path only knows the PRIMARY-role sample (e.g. mid = 4.2k, 45% WR)
+// from the nightly rebuild, which badly under-represents a fresh, heavily-played
+// champion. We recompute the hero numbers live from `participants`:
+//   • games + winrate + KDA → ALL roles, all of the champion's games in the box
+//     (same scope as the Explorer's "totale", so they match).
+//   • pickrate → scoped to the CURRENT patch (a champion's pick rate over patches
+//     it didn't exist in is meaningless), = champ games this patch / matches this patch.
+// Wrapped so a failure just falls back to the snapshot — never breaks the payload.
+type HeroAgg = { games: number; winrate: number; pickrate: number | null; kda: { kills: number; deaths: number; assists: number } };
+const _aggCache = new Map<number, { value: HeroAgg; exp: number }>();
+let _patchMatchCount: { patch: string; value: number; exp: number } | null = null;
+
+async function getPatchMatchCount(client: any, patch: string): Promise<number> {
+  if (_patchMatchCount && _patchMatchCount.patch === patch && Date.now() < _patchMatchCount.exp)
+    return _patchMatchCount.value;
+  const r = await client.query(`SELECT count(*)::int AS n FROM matches WHERE patch = $1`, [patch]);
+  const n = Number(r.rows?.[0]?.n ?? 0);
+  _patchMatchCount = { patch, value: n, exp: Date.now() + 600_000 }; // 10 min
+  return n;
+}
+
+async function getChampionAggregate(champNum: number): Promise<HeroAgg | null> {
+  const hit = _aggCache.get(champNum);
   if (hit && Date.now() < hit.exp) return hit.value;
   const client = await explorerPool().connect();
   try {
     await client.query("SET statement_timeout = 8000");
-    const r = await client.query(
-      `SELECT count(*)::int AS games FROM participants WHERE champion_id = $1`,
+    // all-roles, all-window: games + winrate + KDA
+    const a = await client.query(
+      `SELECT count(*)::int AS games,
+              round(avg((win)::int) * 100, 2)::float8 AS winrate,
+              round(avg(kills), 1)::float8 AS k,
+              round(avg(deaths), 1)::float8 AS d,
+              round(avg(assists), 1)::float8 AS a
+       FROM participants WHERE champion_id = $1`,
       [champNum],
     );
-    const games = Number(r.rows?.[0]?.games ?? 0);
-    _totalGamesCache.set(champNum, { value: games, exp: Date.now() + 300_000 }); // 5 min
-    return games;
+    const games = Number(a.rows?.[0]?.games ?? 0);
+    const winrate = Number(a.rows?.[0]?.winrate ?? 0);
+    const kda = { kills: Number(a.rows?.[0]?.k ?? 0), deaths: Number(a.rows?.[0]?.d ?? 0), assists: Number(a.rows?.[0]?.a ?? 0) };
+
+    // current-patch pickrate
+    let pickrate: number | null = null;
+    const patch = await getLatestPatch();
+    if (patch && games > 0) {
+      const totalCur = await getPatchMatchCount(client, patch);
+      if (totalCur > 0) {
+        const c = await client.query(
+          `SELECT count(*)::int AS n FROM participants p
+           JOIN matches m ON m.match_id = p.match_id
+           WHERE p.champion_id = $1 AND m.patch = $2`,
+          [champNum, patch],
+        );
+        const champCur = Number(c.rows?.[0]?.n ?? 0);
+        pickrate = Math.round((champCur / totalCur) * 1000) / 10; // 1-decimal %
+      }
+    }
+
+    const value: HeroAgg = { games, winrate, pickrate, kda };
+    _aggCache.set(champNum, { value, exp: Date.now() + 300_000 }); // 5 min
+    return value;
   } catch {
-    return null; // never break the stats response over the headline count
+    return null; // never break the stats response over the hero aggregate
   } finally {
     client.release();
   }
@@ -325,10 +368,12 @@ export async function getChampionStatsHandler(req: Request): Promise<Response> {
         const snapData = getSnap(champNum, effectiveRole, tier ?? null);
         if (snapData) {
           const ms = Date.now() - t0;
-          // Headline "Games" = live total across ALL roles (not just this
-          // snapshot's primary-role sample). Additive: existing fields untouched.
-          const totalGames = await getChampionTotalGames(champNum);
-          const out = totalGames != null ? { ...snapData, totalGames } : snapData;
+          // Hero stats = live aggregate across ALL roles (not just this snapshot's
+          // primary-role sample). Additive: existing snapshot fields untouched.
+          const agg = await getChampionAggregate(champNum);
+          const out = agg
+            ? { ...snapData, totalGames: agg.games, totalWinrate: agg.winrate, totalPickrate: agg.pickrate, totalKda: agg.kda }
+            : snapData;
           console.log(`✅ champion stats from snapshot (${ms}ms)`, { champNum, roleNorm: effectiveRole, tier: tier ?? "ALL" });
           cacheSet(cacheKey, out);
           return Response.json(out, {
