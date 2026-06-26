@@ -80,6 +80,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
     let topPlayers: any[] = []
     let preciseRunes: any = null
     let buildPath: any[] = []
+    let bootsSlot: number | null = null // typical build position of boots (1-indexed)
     const client = await explorerPool().connect()
     try {
       await client.query("SET statement_timeout = 15000")
@@ -146,7 +147,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       // the overhaul have them, so the sample is a growing subset; the UI falls
       // back to the keystone-level `runes` when `preciseRunes.sample` is thin.
       if (role) {
-        const [pageR, slotR, bpR] = await Promise.all([
+        const [pageR, slotR, bpR, bsR] = await Promise.all([
           client.query(
             `SELECT perk_keystone AS keystone, perk_primary_style AS primary_style, perk_sub_style AS sub_style,
                     perk_primary, perk_secondary, stat_perks,
@@ -181,7 +182,16 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
              GROUP BY slot, item ORDER BY slot, games DESC`,
             [champion, role]
           ),
+          client.query(
+            `SELECT boots_slot, count(*)::int AS n
+             FROM participants
+             WHERE champion_name = $1 AND role = $2 AND boots_slot IS NOT NULL
+             GROUP BY boots_slot ORDER BY n DESC LIMIT 1`,
+            [champion, role]
+          ),
         ])
+        const bsRow = (bsR.rows as any[])[0]
+        bootsSlot = bsRow ? Number(bsRow.boots_slot) : null
 
         if (pageR.rows.length > 0) {
           const bySlot = new Map<string, { perk: number; games: number; winrate: number }[]>()
@@ -244,6 +254,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       runes,
       preciseRunes,
       buildPath,
+      bootsSlot,
       spells,
       items: { boots: bootsRows, core: coreItems, situational },
       topPlayers,
