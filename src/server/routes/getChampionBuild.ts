@@ -15,7 +15,7 @@ import { explorerPool } from "../explorer/pool"
 const BOOTS = new Set([3006, 3009, 3010, 3020, 3047, 3111, 3117, 3158])
 
 type Cached = { ts: number; payload: unknown }
-const cache = new Map<number, Cached>()
+const cache = new Map<string, Cached>()
 const TTL_MS = 6 * 60 * 60 * 1000
 
 type SnapItem = { item_id: number; winrate: number; pick_rate?: number; games?: number; total_games?: number; wins?: number }
@@ -30,12 +30,27 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       return Response.json({ error: "champKey and champion (name) are required" }, { status: 400 })
     }
 
-    const hit = cache.get(champKey)
+    // Optional role override (the UI passes "UTILITY" for support). Without it
+    // we fall back to the champion's most-played role. This is what lets a flex
+    // pick (e.g. a support that's ALSO played mid) show the RIGHT items instead
+    // of always the #1 role's — the support-items fix.
+    const reqRole = body?.role ? String(body.role).toUpperCase() : null
+    const reqRoleNorm = reqRole === "SUPPORT" ? "UTILITY" : reqRole
+
+    // available roles for this champion (sorted by games desc) — returned so the
+    // UI can render a role switcher.
+    const roles = getChampRoles(champKey)
+    const role =
+      reqRoleNorm && roles.some((r) => r.role === reqRoleNorm)
+        ? reqRoleNorm
+        : roles.length
+          ? roles[0].role
+          : null
+
+    const cacheKey = `${champKey}:${role ?? "none"}`
+    const hit = cache.get(cacheKey)
     if (hit && Date.now() - hit.ts < TTL_MS) return Response.json(hit.payload)
 
-    // main role + snapshot
-    const roles = getChampRoles(champKey)
-    const role = roles.length ? roles[0].role : null
     const snap: any = role ? getSnap(champKey, role, null) : null
     const core = snap?.core ?? null
     const cohort = Number(core?.gamesAnalyzed ?? 0) || 0
@@ -140,8 +155,9 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       spells,
       items: { boots: bootsRows, core: coreItems, situational },
       topPlayers,
+      availableRoles: roles.map((r) => ({ role: r.role, games: r.games })),
     }
-    cache.set(champKey, { ts: Date.now(), payload })
+    cache.set(cacheKey, { ts: Date.now(), payload })
     return Response.json(payload)
   } catch (e: any) {
     console.error("❌ getChampionBuild exception:", e?.message ?? e)
