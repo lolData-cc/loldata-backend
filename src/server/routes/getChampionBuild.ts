@@ -78,6 +78,8 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
     let spells: any[] = []
     let bootsRows: any[] = []
     let topPlayers: any[] = []
+    let preciseRunes: any = null
+    let buildPath: any[] = []
     const client = await explorerPool().connect()
     try {
       await client.query("SET statement_timeout = 15000")
@@ -133,6 +135,84 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
         games: Number(r.games),
         winrate: Number(r.winrate),
       }))
+
+      // ── PRECISE runes (full page + per-slot alternatives) + BUILD PATH order.
+      // From the new perk_*/legendary_order arrays — only matches ingested since
+      // the overhaul have them, so the sample is a growing subset; the UI falls
+      // back to the keystone-level `runes` when `preciseRunes.sample` is thin.
+      if (role) {
+        const [pageR, slotR, bpR] = await Promise.all([
+          client.query(
+            `SELECT perk_keystone AS keystone, perk_primary, perk_secondary, stat_perks,
+                    count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
+             FROM participants
+             WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL
+             GROUP BY 1, 2, 3, 4 ORDER BY games DESC LIMIT 1`,
+            [champion, role]
+          ),
+          client.query(
+            `WITH base AS (
+               SELECT win, perk_primary, perk_secondary, stat_perks
+               FROM participants
+               WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL
+             ), slots AS (
+               SELECT win, 'P' || i AS slot, perk_primary[i]   AS perk FROM base, generate_subscripts(perk_primary, 1)   i
+               UNION ALL
+               SELECT win, 'S' || i, perk_secondary[i]               FROM base, generate_subscripts(perk_secondary, 1) i
+               UNION ALL
+               SELECT win, 'T' || i, stat_perks[i]                   FROM base, generate_subscripts(stat_perks, 1)     i
+             )
+             SELECT slot, perk, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
+             FROM slots WHERE perk IS NOT NULL AND perk > 0
+             GROUP BY slot, perk ORDER BY slot, games DESC`,
+            [champion, role]
+          ),
+          client.query(
+            `SELECT slot, legendary_order[slot] AS item,
+                    count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
+             FROM participants, generate_subscripts(legendary_order, 1) AS slot
+             WHERE champion_name = $1 AND role = $2 AND legendary_order IS NOT NULL AND slot <= 5
+             GROUP BY slot, item ORDER BY slot, games DESC`,
+            [champion, role]
+          ),
+        ])
+
+        const top = pageR.rows[0]
+        if (top) {
+          const bySlot = new Map<string, { perk: number; games: number; winrate: number }[]>()
+          for (const r of slotR.rows as any[]) {
+            const k = String(r.slot)
+            if (!bySlot.has(k)) bySlot.set(k, [])
+            bySlot.get(k)!.push({ perk: Number(r.perk), games: Number(r.games), winrate: Number(r.winrate) })
+          }
+          // total precise-rune games = sum of the keystone slot (each row has exactly one P1)
+          const sample = (slotR.rows as any[])
+            .filter((r) => r.slot === "P1")
+            .reduce((s, r) => s + Number(r.games), 0)
+          preciseRunes = {
+            sample,
+            page: {
+              keystone: Number(top.keystone),
+              primary: (top.perk_primary as number[]) ?? [],
+              secondary: (top.perk_secondary as number[]) ?? [],
+              shards: (top.stat_perks as number[]) ?? [],
+              games: Number(top.games),
+              winrate: Number(top.winrate),
+            },
+            slots: [...bySlot.entries()].map(([slot, options]) => ({ slot, options })),
+          }
+        }
+
+        const byBuildSlot = new Map<number, { item: number; games: number; winrate: number }[]>()
+        for (const r of bpR.rows as any[]) {
+          const s = Number(r.slot)
+          if (!byBuildSlot.has(s)) byBuildSlot.set(s, [])
+          byBuildSlot.get(s)!.push({ item: Number(r.item), games: Number(r.games), winrate: Number(r.winrate) })
+        }
+        buildPath = [...byBuildSlot.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([slot, items]) => ({ slot, items }))
+      }
     } finally {
       client.release()
     }
@@ -152,6 +232,8 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
           }
         : null,
       runes,
+      preciseRunes,
+      buildPath,
       spells,
       items: { boots: bootsRows, core: coreItems, situational },
       topPlayers,
