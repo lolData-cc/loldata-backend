@@ -47,7 +47,28 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
           ? roles[0].role
           : null
 
-    const cacheKey = `${champKey}:${role ?? "none"}`
+    // Optional cohort filters: vs (lane-opponent champion name), patch, region
+    // (platform, e.g. "euw1"). vs uses the lane shortcut: role is unique per team,
+    // so "matches where champion X also played this role" = the lane opponent.
+    const vs = typeof body?.vs === "string" && body.vs.trim() ? body.vs.trim() : null
+    const fPatch = typeof body?.patch === "string" && body.patch.trim() ? body.patch.trim() : null
+    const fRegion = typeof body?.region === "string" && body.region.trim() ? body.region.trim() : null
+    const cohortFilter = (startIdx: number): { sql: string; params: any[] } => {
+      const parts: string[] = []; const params: any[] = []; let i = startIdx
+      if (fPatch || fRegion) {
+        const mp: string[] = []
+        if (fPatch) { params.push(fPatch); mp.push(`patch = $${i++}`) }
+        if (fRegion) { params.push(fRegion); mp.push(`platform = $${i++}`) }
+        parts.push(`match_id IN (SELECT match_id FROM matches WHERE ${mp.join(" AND ")})`)
+      }
+      if (vs && role) {
+        params.push(role, vs)
+        parts.push(`match_id IN (SELECT match_id FROM participants WHERE role = $${i++} AND champion_name = $${i++})`)
+      }
+      return { sql: parts.length ? " AND " + parts.join(" AND ") : "", params }
+    }
+
+    const cacheKey = `${champKey}:${role ?? "none"}:${vs ?? ""}:${fPatch ?? ""}:${fRegion ?? ""}`
     const hit = cache.get(cacheKey)
     if (hit && Date.now() - hit.ts < TTL_MS) return Response.json(hit.payload)
 
@@ -107,6 +128,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
         pickrate: r.pickrate != null ? Number(r.pickrate) : null,
       }))
 
+      const fb = cohortFilter(4)
       const bt = await client.query(
         `SELECT item, games, winrate,
                 round(games::numeric / nullif(sum(games) over (), 0) * 100, 1)::float8 AS pickrate
@@ -114,13 +136,13 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
            SELECT item, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
            FROM (
              SELECT unnest(ARRAY[item0,item1,item2,item3,item4,item5,item6]) AS item, win
-             FROM participants WHERE champion_name = $1 AND ($3::text IS NULL OR role = $3)
+             FROM participants WHERE champion_name = $1 AND ($3::text IS NULL OR role = $3)${fb.sql}
            ) u
            WHERE item = ANY($2::int[])
            GROUP BY item
          ) t
          ORDER BY games DESC LIMIT 4`,
-        [champion, [...BOOTS], role]
+        [champion, [...BOOTS], role, ...fb.params]
       )
       bootsRows = bt.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate), pickrate: r.pickrate != null ? Number(r.pickrate) : null }))
 
@@ -147,21 +169,22 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       // the overhaul have them, so the sample is a growing subset; the UI falls
       // back to the keystone-level `runes` when `preciseRunes.sample` is thin.
       if (role) {
+        const f = cohortFilter(3) // patch/region/vs narrowing — all 4 queries below are [champion,role,…]
         const [pageR, slotR, bpR, bsR] = await Promise.all([
           client.query(
             `SELECT perk_keystone AS keystone, perk_primary_style AS primary_style, perk_sub_style AS sub_style,
                     perk_primary, perk_secondary, stat_perks,
                     count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
              FROM participants
-             WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL AND perk_primary_style IS NOT NULL
+             WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL AND perk_primary_style IS NOT NULL${f.sql}
              GROUP BY 1, 2, 3, 4, 5, 6 ORDER BY games DESC LIMIT 5`,
-            [champion, role]
+            [champion, role, ...f.params]
           ),
           client.query(
             `WITH base AS (
                SELECT win, perk_primary, perk_secondary, stat_perks
                FROM participants
-               WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL
+               WHERE champion_name = $1 AND role = $2 AND perk_primary IS NOT NULL${f.sql}
              ), slots AS (
                SELECT win, 'P' || i AS slot, perk_primary[i]   AS perk FROM base, generate_subscripts(perk_primary, 1)   i
                UNION ALL
@@ -172,22 +195,22 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
              SELECT slot, perk, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
              FROM slots WHERE perk IS NOT NULL AND perk > 0
              GROUP BY slot, perk ORDER BY slot, games DESC`,
-            [champion, role]
+            [champion, role, ...f.params]
           ),
           client.query(
             `SELECT slot, legendary_order[slot] AS item,
                     count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
              FROM participants, generate_subscripts(legendary_order, 1) AS slot
-             WHERE champion_name = $1 AND role = $2 AND legendary_order IS NOT NULL AND slot <= 5
+             WHERE champion_name = $1 AND role = $2 AND legendary_order IS NOT NULL AND slot <= 5${f.sql}
              GROUP BY slot, item ORDER BY slot, games DESC`,
-            [champion, role]
+            [champion, role, ...f.params]
           ),
           client.query(
             `SELECT boots_slot, count(*)::int AS n
              FROM participants
-             WHERE champion_name = $1 AND role = $2 AND boots_slot IS NOT NULL
+             WHERE champion_name = $1 AND role = $2 AND boots_slot IS NOT NULL${f.sql}
              GROUP BY boots_slot ORDER BY n DESC LIMIT 1`,
-            [champion, role]
+            [champion, role, ...f.params]
           ),
         ])
         const bsRow = (bsR.rows as any[])[0]
