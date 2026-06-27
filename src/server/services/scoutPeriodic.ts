@@ -50,6 +50,31 @@ async function sweepOnce(): Promise<void> {
     if (!puuidToRegion.has(r.puuid)) puuidToRegion.set(r.puuid, r.region);
   }
 
+  // ALSO snapshot every PREMIUM/ELITE user's linked account — their LP is now
+  // tracked across ALL their ranked games (surfaced per-match on the summoner
+  // page), not just inside scout lobbies. Same writeRankSnapshot path + dedupe.
+  let premiumAdded = 0;
+  {
+    const { data: premium, error: pErr } = await supabaseAdmin
+      .from("profile_players")
+      .select("puuid, region")
+      .in("plan", ["premium", "elite"])
+      .not("puuid", "is", null);
+    if (pErr) {
+      console.warn("[scout-periodic] premium account list error:", pErr.message);
+    } else {
+      for (const r of (premium ?? []) as Array<{ puuid: string; region: string }>) {
+        if (r.puuid && r.region && !puuidToRegion.has(r.puuid)) {
+          puuidToRegion.set(r.puuid, r.region);
+          premiumAdded++;
+        }
+      }
+    }
+  }
+  if (premiumAdded > 0) {
+    console.log(`[scout-periodic] +${premiumAdded} premium/elite accounts to snapshot`);
+  }
+
   const total = puuidToRegion.size;
   let ok = 0;
   let failed = 0;

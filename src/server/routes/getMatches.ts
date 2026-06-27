@@ -6,6 +6,7 @@
 import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match tables → box, users → Cloud (hybrid)
 import { getAccountByRiotId, getMatchDetails, getMatchIdsByPuuidOpts, RateLimitError } from "../riot";
 import { ingestQuickThenBackground } from "../services/matchIngest";
+import { computeLpDeltas } from "../services/rankSnapshot";
 import { getCurrentSeasonWindow } from "../season";
 
 // ── In-memory caches ──
@@ -168,6 +169,30 @@ export async function getMatchesHandler(req: Request): Promise<Response> {
     ingestQuickThenBackground(puuid, region).catch(e =>
       console.error("⚠️ Background ingestion error:", e)
     );
+
+    // Per-game LP delta from rank snapshots (premium/elite accounts are
+    // snapshotted every sweep, so their ranked games get a real LP change here;
+    // untracked accounts have no snapshots → lpDelta stays null). Non-fatal.
+    try {
+      const lpInputs = matches
+        .map((r: any) => {
+          const info = r.match?.info ?? {};
+          const st = info.gameStartTimestamp ?? info.gameCreation ?? 0;
+          return {
+            matchId: r.match?.metadata?.matchId ?? "",
+            queueId: Number(info.queueId ?? 0),
+            gameEndMs: info.gameEndTimestamp ?? st + (info.gameDuration ?? 0) * 1000,
+          };
+        })
+        .filter((x: any) => x.matchId);
+      const deltas = await computeLpDeltas(puuid, lpInputs);
+      for (const r of matches as any[]) {
+        const id = r.match?.metadata?.matchId;
+        r.lpDelta = id ? deltas.get(id) ?? null : null;
+      }
+    } catch (e) {
+      console.warn("⚠️ lpDelta compute failed:", (e as any)?.message ?? e);
+    }
 
     const result = {
       matches,

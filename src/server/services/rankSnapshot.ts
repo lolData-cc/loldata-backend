@@ -72,6 +72,79 @@ export function ladderScore(
   return t * LP_PER_TIER + (dIdx - 1) * LP_PER_DIVISION + lp;
 }
 
+// Match-v5 queueId → league-v4 queueType. The ONLY place that knows the ranked
+// queues we LP-track; extend it to add a queue everywhere at once.
+//   420 Solo, 440 Flex. Ranked 5s (relaunched 2026-06-26 weekend queue) has its
+//   own separate LP ladder — slot its (queueId → queueType) here once confirmed
+//   from live league-v4 / match-v5 data.
+export const RANKED_QUEUE_TYPE: Record<number, string> = {
+  420: "RANKED_SOLO_5x5",
+  440: "RANKED_FLEX_SR",
+};
+
+export type MatchLpInput = { matchId: string; queueId: number; gameEndMs: number };
+
+/**
+ * Per-match LP delta for a puuid, computed from its rank snapshots with the
+ * same before/after matching the scout feed uses (prefer the match_id-linked
+ * post-game snapshot, else the first snapshot taken at/after game end; the
+ * "before" is the one immediately preceding it). ladderScore delta so promo/
+ * demote games count correctly. Returns matchId → lpDelta, or null when there
+ * isn't a before+after pair (e.g. non-tracked accounts have no snapshots).
+ */
+export async function computeLpDeltas(
+  puuid: string,
+  matches: MatchLpInput[]
+): Promise<Map<string, number | null>> {
+  const out = new Map<string, number | null>();
+  if (!matches.length) return out;
+  const queueTypes = [
+    ...new Set(matches.map((m) => RANKED_QUEUE_TYPE[m.queueId]).filter(Boolean)),
+  ];
+  if (!queueTypes.length) return out;
+
+  const { data } = await supabaseAdmin
+    .from("scout_rank_snapshots")
+    .select("queue_type, tier, rank_division, lp, taken_at, match_id")
+    .eq("puuid", puuid)
+    .in("queue_type", queueTypes)
+    .order("taken_at", { ascending: true })
+    .limit(5000);
+
+  const byQueue = new Map<string, any[]>();
+  for (const s of (data ?? []) as any[]) {
+    if (!byQueue.has(s.queue_type)) byQueue.set(s.queue_type, []);
+    byQueue.get(s.queue_type)!.push(s);
+  }
+
+  for (const m of matches) {
+    const qt = RANKED_QUEUE_TYPE[m.queueId];
+    const list = qt ? byQueue.get(qt) : undefined;
+    if (!list || list.length < 2) {
+      out.set(m.matchId, null);
+      continue;
+    }
+    let afterIdx = list.findIndex((s) => s.match_id === m.matchId);
+    if (afterIdx === -1) {
+      afterIdx = list.findIndex(
+        (s) => new Date(s.taken_at).getTime() >= m.gameEndMs
+      );
+    }
+    if (afterIdx <= 0) {
+      out.set(m.matchId, null);
+      continue;
+    }
+    const before = list[afterIdx - 1];
+    const after = list[afterIdx];
+    out.set(
+      m.matchId,
+      ladderScore(after.tier, after.rank_division, Number(after.lp ?? 0)) -
+        ladderScore(before.tier, before.rank_division, Number(before.lp ?? 0))
+    );
+  }
+  return out;
+}
+
 // Anti-spam: don't write a new snapshot if the latest existing one for this
 // (puuid, queue) is identical and was taken in the last N minutes.
 const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
