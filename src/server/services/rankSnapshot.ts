@@ -139,11 +139,17 @@ export async function computeLpDeltas(
     }
     const before = list[afterIdx - 1];
     const after = list[afterIdx];
-    out.set(
-      m.matchId,
+    const delta =
       ladderScore(after.tier, after.rank_division, Number(after.lp ?? 0)) -
-        ladderScore(before.tier, before.rank_division, Number(before.lp ?? 0))
-    );
+      ladderScore(before.tier, before.rank_division, Number(before.lp ?? 0));
+    if (delta === 0) {
+      const ctx = list
+        .slice(Math.max(0, afterIdx - 2), afterIdx + 2)
+        .map((s: any) => `${s.lp}lp@${new Date(s.taken_at).toISOString().slice(5, 16)} mid=${(s.match_id || "-").slice(-6)}`)
+        .join(" | ");
+      console.log(`[lpdiag] m=${m.matchId.slice(-6)} ZERO afterIdx=${afterIdx} byMid=${after.match_id === m.matchId} gameEnd=${new Date(m.gameEndMs).toISOString().slice(5, 16)} ctx=[${ctx}]`);
+    }
+    out.set(m.matchId, delta);
   }
   return out;
 }
