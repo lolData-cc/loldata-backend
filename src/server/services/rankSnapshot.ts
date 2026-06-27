@@ -120,36 +120,48 @@ export async function computeLpDeltas(
     byQueue.get(s.queue_type)!.push(s);
   }
 
+  // Riot's league-v4 LP lags a few minutes behind game end, so a snapshot taken
+  // right at game end is often STALE (still the pre-game LP) — the real result
+  // lands in a snapshot a few minutes later. Bracket each game by:
+  //   before = latest snapshot at/before game end (the pre-result LP);
+  //   after  = the first snapshot after it, bounded to the NEXT game in the same
+  //            queue, whose ladderScore actually CHANGED.
+  // If nothing changed but a SETTLED snapshot (>4 min past game end) confirms it,
+  // the game genuinely netted 0 LP (e.g. Aegis-of-Valor no-LP-loss) → 0. If it
+  // hasn't settled yet (most-recent game, update not captured) → null.
+  const SETTLE_MS = 4 * 60 * 1000;
+  const perQueue = new Map<string, MatchLpInput[]>();
   for (const m of matches) {
     const qt = RANKED_QUEUE_TYPE[m.queueId];
-    const list = qt ? byQueue.get(qt) : undefined;
-    if (!list || list.length < 2) {
-      out.set(m.matchId, null);
-      continue;
+    if (!qt) { out.set(m.matchId, null); continue; }
+    if (!perQueue.has(qt)) perQueue.set(qt, []);
+    perQueue.get(qt)!.push(m);
+  }
+  for (const [qt, ms] of perQueue) {
+    const snaps = byQueue.get(qt);
+    const games = [...ms].sort((a, b) => a.gameEndMs - b.gameEndMs);
+    for (let i = 0; i < games.length; i++) {
+      const g = games[i];
+      if (!snaps || snaps.length < 2) { out.set(g.matchId, null); continue; }
+      const nextEnd = i + 1 < games.length ? games[i + 1].gameEndMs : Infinity;
+      let before: any = null;
+      for (let j = snaps.length - 1; j >= 0; j--) {
+        if (new Date(snaps[j].taken_at).getTime() <= g.gameEndMs) { before = snaps[j]; break; }
+      }
+      if (!before) { out.set(g.matchId, null); continue; }
+      const beforeScore = ladderScore(before.tier, before.rank_division, Number(before.lp ?? 0));
+      let changed: number | null = null;
+      let settledSame = false;
+      for (const s of snaps) {
+        const t = new Date(s.taken_at).getTime();
+        if (t <= g.gameEndMs) continue;
+        if (t >= nextEnd) break;
+        const sc = ladderScore(s.tier, s.rank_division, Number(s.lp ?? 0));
+        if (sc !== beforeScore) { changed = sc; break; }
+        if (t >= g.gameEndMs + SETTLE_MS) settledSame = true;
+      }
+      out.set(g.matchId, changed != null ? changed - beforeScore : settledSame ? 0 : null);
     }
-    let afterIdx = list.findIndex((s) => s.match_id === m.matchId);
-    if (afterIdx === -1) {
-      afterIdx = list.findIndex(
-        (s) => new Date(s.taken_at).getTime() >= m.gameEndMs
-      );
-    }
-    if (afterIdx <= 0) {
-      out.set(m.matchId, null);
-      continue;
-    }
-    const before = list[afterIdx - 1];
-    const after = list[afterIdx];
-    const delta =
-      ladderScore(after.tier, after.rank_division, Number(after.lp ?? 0)) -
-      ladderScore(before.tier, before.rank_division, Number(before.lp ?? 0));
-    if (delta === 0) {
-      const ctx = list
-        .slice(Math.max(0, afterIdx - 2), afterIdx + 2)
-        .map((s: any) => `${s.lp}lp@${new Date(s.taken_at).toISOString().slice(5, 16)} mid=${(s.match_id || "-").slice(-6)}`)
-        .join(" | ");
-      console.log(`[lpdiag] m=${m.matchId.slice(-6)} ZERO afterIdx=${afterIdx} byMid=${after.match_id === m.matchId} gameEnd=${new Date(m.gameEndMs).toISOString().slice(5, 16)} ctx=[${ctx}]`);
-    }
-    out.set(m.matchId, delta);
   }
   return out;
 }
