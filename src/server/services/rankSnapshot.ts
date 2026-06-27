@@ -119,7 +119,6 @@ export async function computeLpDeltas(
     if (!byQueue.has(s.queue_type)) byQueue.set(s.queue_type, []);
     byQueue.get(s.queue_type)!.push(s);
   }
-  console.log(`[lpDelta] ${puuid.slice(0, 8)}… snaps=${(data ?? []).length} latest=${(data ?? [])[0]?.taken_at ?? "none"} queues=${queueTypes.join(",")}`);
 
   for (const m of matches) {
     const qt = RANKED_QUEUE_TYPE[m.queueId];
