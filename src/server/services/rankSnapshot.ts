@@ -103,19 +103,23 @@ export async function computeLpDeltas(
   ];
   if (!queueTypes.length) return out;
 
+  // Most-RECENT 5000 (DESC + reverse to chronological). An active tracked
+  // account can have thousands of snapshots; an ASC limit would return the
+  // OLDEST and miss the ones bracketing today's games → lpDelta always null.
   const { data } = await supabaseAdmin
     .from("scout_rank_snapshots")
     .select("queue_type, tier, rank_division, lp, taken_at, match_id")
     .eq("puuid", puuid)
     .in("queue_type", queueTypes)
-    .order("taken_at", { ascending: true })
+    .order("taken_at", { ascending: false })
     .limit(5000);
 
   const byQueue = new Map<string, any[]>();
-  for (const s of (data ?? []) as any[]) {
+  for (const s of ((data ?? []) as any[]).slice().reverse()) {
     if (!byQueue.has(s.queue_type)) byQueue.set(s.queue_type, []);
     byQueue.get(s.queue_type)!.push(s);
   }
+  console.log(`[lpDelta] ${puuid.slice(0, 8)}… snaps=${(data ?? []).length} latest=${(data ?? [])[0]?.taken_at ?? "none"} queues=${queueTypes.join(",")}`);
 
   for (const m of matches) {
     const qt = RANKED_QUEUE_TYPE[m.queueId];
