@@ -75,64 +75,18 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     const nameLower = name.toLowerCase()
     const tagLower  = tag.toLowerCase()
 
-    // 0) Global cooldown check — if updated within 180s, return cached data
+    // 0) Global update cooldown — returned below as a UX hint only.
+    //    The old short-circuit that returned a cached `users` row here was
+    //    REMOVED: that table has no wins/losses/level columns, so the cached
+    //    response hardcoded wins:0 / losses:0 / level:0. It was harmless while
+    //    dormant (the users upsert was failing on a bad onConflict, so
+    //    last_searched_at never saved → the cooldown never triggered), but once
+    //    the upsert was fixed to onConflict:'puuid' (8c9b8cd) last_searched_at
+    //    started saving and EVERY repeat view within 180s returned a zeroed
+    //    profile ("0W 0L · Level 0"). Always do the full Riot fetch so the data
+    //    is correct; the 180s value is still surfaced to gate the frontend's
+    //    manual "update" button.
     const COOLDOWN_S = 180
-    {
-      const { data: cachedUser } = await supabase
-        .from("users")
-        .select("name, tag, puuid, icon_id, rank, lp, peak_rank, peak_lp, flex_rank, flex_lp, peak_flex_rank, peak_flex_lp, last_searched_at, region")
-        .eq("name", name).eq("tag", tag)
-        .single()
-
-      if (cachedUser?.last_searched_at) {
-        const elapsed = (Date.now() - new Date(cachedUser.last_searched_at).getTime()) / 1000
-        if (elapsed < COOLDOWN_S) {
-          // Fetch avatar_url for cached response
-          let avatarUrl: string | null = null
-          if (cachedUser.puuid) {
-            const { data: row } = await supabase
-              .from("profile_players")
-              .select("avatar_url")
-              .eq("puuid", cachedUser.puuid)
-              .maybeSingle()
-            avatarUrl = row?.avatar_url ?? null
-          }
-
-          // Ladder position for cached Master+ users
-          const cachedTier = (cachedUser.rank ?? "").split(" ")[0]?.toUpperCase()
-          const cachedLadderRank = cachedUser.puuid && APEX_TIERS.has(cachedTier)
-            ? await getLadderPosition(cachedUser.puuid, cachedTier, region).catch(() => null)
-            : null
-
-          const summoner = {
-            name: cachedUser.name,
-            puuid: cachedUser.puuid,
-            tag: cachedUser.tag,
-            rank: cachedUser.rank ?? "Unranked",
-            lp: cachedUser.lp ?? 0,
-            wins: 0,
-            losses: 0,
-            profileIconId: cachedUser.icon_id,
-            level: 0,
-            live: false,
-            peakRank: cachedUser.peak_rank ?? "Unranked",
-            peakLp: cachedUser.peak_lp ?? 0,
-            flexRank: cachedUser.flex_rank ?? "Unranked",
-            flexLp: cachedUser.flex_lp ?? 0,
-            peakFlexRank: cachedUser.peak_flex_rank ?? "Unranked",
-            peakFlexLp: cachedUser.peak_flex_lp ?? 0,
-            avatar_url: avatarUrl,
-            ladderRank: cachedLadderRank,
-          }
-
-          return Response.json({
-            summoner,
-            saved: true,
-            cooldownRemaining: Math.ceil(COOLDOWN_S - elapsed),
-          })
-        }
-      }
-    }
 
     // 1) Account -> PUUID
     const accountRes = await fetch(
