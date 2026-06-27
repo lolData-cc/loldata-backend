@@ -121,6 +121,7 @@ export async function getChampionBuildStatsHandler(req: Request): Promise<Respon
     let laning: any = null
     let laningVs: any = null
     let gameLength: any[] | null = null
+    let skillOrder: any = null
     try {
       await client.query("SET statement_timeout = 20000")
       // Single-threaded: parallel-gather workers exhaust the supabase-db /dev/shm
@@ -215,11 +216,40 @@ export async function getChampionBuildStatsHandler(req: Request): Promise<Respon
         const hit = byBucket.get(bk.b)
         return { label: bk.label, min: bk.min, games: hit?.games ?? 0, winrate: hit ? hit.winrate : null }
       })
+
+      // ── skill order — most common ability leveled at each level 1-18 ──
+      // From `skill_order` (1=Q,2=W,3=E,4=R), captured in ingest from the timeline.
+      // Accrues over time (only NEW matches have it), so the sample grows.
+      const skf = patchRegionFilter(3, fPatch, fRegion)
+      const skres = await client.query(
+        `SELECT idx, mode() WITHIN GROUP (ORDER BY slot)::int AS slot, count(*)::int AS n
+         FROM participants p, unnest(p.skill_order) WITH ORDINALITY AS u(slot, idx)
+         WHERE p.champion_name = $1 AND ($2::text IS NULL OR p.role = $2) AND p.skill_order IS NOT NULL${skf.sql}
+         GROUP BY idx ORDER BY idx`,
+        [champion, role, ...skf.params]
+      )
+      if (skres.rows.length > 0) {
+        const perLevel: number[] = new Array(18).fill(0)
+        let sample = 0
+        for (const r of skres.rows as any[]) {
+          const i = Number(r.idx)
+          if (i >= 1 && i <= 18) perLevel[i - 1] = Number(r.slot)
+          if (i === 1) sample = Number(r.n)
+        }
+        // priority = order in which Q/W/E (slots 1,2,3) reach 5 points
+        const fifthAt = (slot: number) => {
+          let c = 0
+          for (let i = 0; i < perLevel.length; i++) if (perLevel[i] === slot && ++c === 5) return i
+          return 99
+        }
+        const priority = [1, 2, 3].map((s) => ({ s, at: fifthAt(s) })).filter((x) => x.at < 99).sort((a, b) => a.at - b.at).map((x) => x.s)
+        skillOrder = { sample, perLevel, priority }
+      }
     } finally {
       client.release()
     }
 
-    const payload = { champion, role, vs, stats, baseline, laning, laningVs, gameLength }
+    const payload = { champion, role, vs, stats, baseline, laning, laningVs, gameLength, skillOrder }
     cache.set(cacheKey, { ts: Date.now(), payload })
     return Response.json(payload)
   } catch (e: any) {
