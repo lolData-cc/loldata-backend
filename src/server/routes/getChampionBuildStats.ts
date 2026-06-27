@@ -101,6 +101,9 @@ export async function getChampionBuildStatsHandler(req: Request): Promise<Respon
     let laningVs: any = null
     try {
       await client.query("SET statement_timeout = 20000")
+      // Single-threaded: parallel-gather workers exhaust the supabase-db /dev/shm
+      // under concurrent load (the role baseline scans 7M+ rows). Indexed + cached.
+      await client.query("SET max_parallel_workers_per_gather = 0")
 
       // ── champion stats ──
       const cf = patchRegionFilter(3, fPatch, fRegion)

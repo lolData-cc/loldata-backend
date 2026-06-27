@@ -105,6 +105,11 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
     const client = await explorerPool().connect()
     try {
       await client.query("SET statement_timeout = 15000")
+      // Disable parallel-gather: these aggregations are indexed + cached, and
+      // parallel workers exhaust the supabase-db container's small /dev/shm under
+      // concurrent load (warmer + live traffic) → "could not resize shared memory
+      // segment" 500s. Single-threaded is plenty fast here.
+      await client.query("SET max_parallel_workers_per_gather = 0")
       const sp = await client.query(
         `SELECT s1, s2, games, winrate,
                 round(games::numeric / nullif(sum(games) over (), 0) * 100, 1)::float8 AS pickrate

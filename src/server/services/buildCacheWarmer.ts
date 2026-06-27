@@ -29,7 +29,7 @@ import { snapshotsLoaded } from "../routes/getChampionStats";
 
 const BOOT_DELAY_MS = 60_000; // after boot — server warm + snapshots usually loaded
 const REFRESH_EVERY_MS = 5 * 60 * 60 * 1000; // 5h: under the handler's 6h TTL → keys never go cold
-const CONCURRENCY = Math.max(1, Number(process.env.BUILD_WARM_CONCURRENCY ?? 2));
+const CONCURRENCY = Math.max(1, Number(process.env.BUILD_WARM_CONCURRENCY ?? 1));
 const SNAP_WAIT_MAX_MS = 5 * 60 * 1000; // give the snapshot preload up to 5 min
 
 let started = false;
