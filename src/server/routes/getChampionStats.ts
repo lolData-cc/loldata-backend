@@ -41,6 +41,13 @@ export function getSnap(champId: number, role: string, tier: string | null) {
   return _snapCache.get(snapKey(champId, role, tier)) ?? null;
 }
 
+/** True once the first snapshot preload has populated the in-memory cache.
+ *  The build-cache warmer waits on this so it never caches a role-less (and
+ *  therefore buildPath/preciseRunes-less) payload before snapshots are ready. */
+export function snapshotsLoaded(): boolean {
+  return _snapLoaded;
+}
+
 export function getChampRoles(champId: number): { role: string; games: number }[] {
   const roles: { role: string; games: number }[] = [];
   for (const [key, data] of _snapCache.entries()) {

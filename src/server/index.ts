@@ -162,6 +162,13 @@ startScoutPeriodicSweep();
 import { startTierlistNightly } from "./services/tierlistPeriodic";
 startTierlistNightly();
 
+// Pre-warm the champion Build-tab cache (POST /api/champion/build). Cold it's a
+// 3-7s aggregation over participants; warm it's ~0.2s. The cache is in-process,
+// so without this every champion's first visitor after a deploy/6h-expiry ate
+// the full cold latency. Boot catch-up + 5h refresh keeps the default view hot.
+import { startBuildCacheWarmer } from "./services/buildCacheWarmer";
+startBuildCacheWarmer();
+
 // Warm the champion class/damage map (Data Dragon) so the Explorer's category
 // filters + conditional item-strength analysis have data. Fire-and-forget; the
 // getters no-op safely until it's ready.
