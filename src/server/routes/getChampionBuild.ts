@@ -236,7 +236,10 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
         )
         const rows = ju.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate), pickrate: r.pickrate != null ? Number(r.pickrate) : null }))
         const total = rows.reduce((s: number, r: any) => s + r.games, 0)
-        if (total >= 20) jungleRows = rows
+        // Section appears once the column has accrued enough overall; per-pet, hide
+        // rows with a tiny sample so we don't surface "100% (1 game)" while the
+        // newly-captured data is still ramping up.
+        if (total >= 20) jungleRows = rows.filter((r: any) => r.games >= 5)
       }
 
       const tp = await client.query(
