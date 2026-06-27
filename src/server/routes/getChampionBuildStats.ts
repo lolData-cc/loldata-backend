@@ -35,6 +35,27 @@ function patchRegionFilter(startIdx: number, fPatch: string | null, fRegion: str
   return { sql: ` AND match_id IN (SELECT match_id FROM matches WHERE ${mp.join(" AND ")})`, params }
 }
 
+// Same cohort, but applied to an already-JOINed `matches m` (avoids the subquery
+// + the ambiguous bare `match_id` in a join).
+function patchRegionOnM(startIdx: number, fPatch: string | null, fRegion: string | null): { sql: string; params: any[] } {
+  const params: any[] = []
+  let i = startIdx
+  const mp: string[] = []
+  if (fPatch) { params.push(fPatch); mp.push(`m.patch = $${i++}`) }
+  if (fRegion) { params.push(fRegion); mp.push(`m.platform = $${i++}`) }
+  return { sql: mp.length ? ` AND ${mp.join(" AND ")}` : "", params }
+}
+
+// 5-min game-length buckets from 15 min (width_bucket index → label/start-min).
+const LENGTH_BUCKETS = [
+  { b: 1, label: "15-20", min: 15 },
+  { b: 2, label: "20-25", min: 20 },
+  { b: 3, label: "25-30", min: 25 },
+  { b: 4, label: "30-35", min: 30 },
+  { b: 5, label: "35-40", min: 35 },
+  { b: 6, label: "40+", min: 40 },
+]
+
 const STAT_SELECT = `
   count(*)::int AS games,
   round(avg((win)::int) * 100, 2)::float8 AS winrate,
@@ -99,6 +120,7 @@ export async function getChampionBuildStatsHandler(req: Request): Promise<Respon
     let baseline: any = null
     let laning: any = null
     let laningVs: any = null
+    let gameLength: any[] | null = null
     try {
       await client.query("SET statement_timeout = 20000")
       // Single-threaded: parallel-gather workers exhaust the supabase-db /dev/shm
@@ -173,11 +195,31 @@ export async function getChampionBuildStatsHandler(req: Request): Promise<Respon
           xpDiff: num(vr.xp_diff), damageDiff: num(vr.dmg_diff),
         } : null
       }
+
+      // ── win rate by game length (5-min buckets from 15 min) ──
+      const gf = patchRegionOnM(3, fPatch, fRegion)
+      const gres = await client.query(
+        `SELECT width_bucket(m.game_duration_seconds, ARRAY[900,1200,1500,1800,2100,2400]) AS b,
+                count(*)::int AS games,
+                round(avg((p.win)::int) * 100, 2)::float8 AS winrate
+         FROM participants p
+         JOIN matches m ON m.match_id = p.match_id
+         WHERE p.champion_name = $1 AND ($2::text IS NULL OR p.role = $2)
+           AND m.game_duration_seconds >= 900${gf.sql}
+         GROUP BY b`,
+        [champion, role, ...gf.params]
+      )
+      const byBucket = new Map<number, { games: number; winrate: number }>()
+      for (const r of gres.rows as any[]) byBucket.set(Number(r.b), { games: Number(r.games), winrate: Number(r.winrate) })
+      gameLength = LENGTH_BUCKETS.map((bk) => {
+        const hit = byBucket.get(bk.b)
+        return { label: bk.label, min: bk.min, games: hit?.games ?? 0, winrate: hit ? hit.winrate : null }
+      })
     } finally {
       client.release()
     }
 
-    const payload = { champion, role, vs, stats, baseline, laning, laningVs }
+    const payload = { champion, role, vs, stats, baseline, laning, laningVs, gameLength }
     cache.set(cacheKey, { ts: Date.now(), payload })
     return Response.json(payload)
   } catch (e: any) {
