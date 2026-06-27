@@ -19,7 +19,10 @@ import { explorerPool } from "../explorer/pool"
 
 type Cached = { ts: number; payload: unknown }
 const cache = new Map<string, Cached>()
-const TTL_MS = 6 * 60 * 60 * 1000
+// 1h (not 6h): skillOrder/gameLength are still ACCRUING from the ingest, so a
+// shorter TTL lets a champ's chart "light up" within ~1h of crossing the sample
+// threshold instead of staying stale. The role baseline is cached 12h separately.
+const TTL_MS = 1 * 60 * 60 * 1000
 
 const baselineCache = new Map<string, { ts: number; value: any }>()
 const BASELINE_TTL_MS = 12 * 60 * 60 * 1000
