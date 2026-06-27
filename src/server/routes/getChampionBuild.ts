@@ -11,8 +11,31 @@
 import { getSnap, getChampRoles } from "./getChampionStats"
 import { explorerPool } from "../explorer/pool"
 
-// Tier-2 boots item ids (stable across patches).
-const BOOTS = new Set([3006, 3009, 3010, 3020, 3047, 3111, 3117, 3158])
+// Boots. Tier-2 (the classic buy) PLUS the S15+ "Feats of Strength" tier-3
+// upgrades, which transform a tier-2 boot in place (new item id, old one gone).
+// We must count the upgrades too: in lanes that almost always upgrade (esp. MID),
+// the leftover tier-2-only inventories are the rare NON-upgraded — i.e. behind /
+// losing — games, so a tier-2-only winrate reads absurdly low. Each tier-3 maps
+// back to its tier-2 root so the whole boot LINE aggregates as one.
+const BOOTS_T2 = new Set([3005, 3006, 3008, 3009, 3010, 3020, 3047, 3111, 3117, 3158])
+const BOOT_T3_TO_T2: Record<number, number> = {
+  3013: 3010, 3176: 3010, // Synchronized Souls / Forever Forward → Symbiotic Soles
+  3168: 3008,             // Immortal Path → Gluttonous Greaves
+  3170: 3009,             // Swiftmarch → Boots of Swiftness
+  3171: 3158,             // Crimson Lucidity → Ionian Boots of Lucidity
+  3173: 3111,             // Chainlaced Crushers → Mercury's Treads
+  3174: 3047,             // Armored Advance → Plated Steelcaps
+  3175: 3020,             // Spellslinger's Shoes → Sorcerer's Shoes
+}
+const ALL_BOOTS = new Set<number>([...BOOTS_T2, ...Object.keys(BOOT_T3_TO_T2).map(Number)])
+const bootLineRoot = (id: number): number => BOOT_T3_TO_T2[id] ?? id
+
+// Support quest item — the 5 FINAL forms of the World Atlas line (a support
+// specialises into exactly one). Surfaced so the Build tab actually tells a
+// support which support item to finish, which the frozen item snapshot never
+// listed. We deliberately omit the transitional 3865/3866/3867 (unfinished /
+// not-yet-specialised — i.e. early-surrender noise, not a recommendation).
+const SUPPORT_ITEMS = new Set([3869, 3870, 3871, 3876, 3877])
 
 type Cached = { ts: number; payload: unknown }
 const cache = new Map<string, Cached>()
@@ -78,7 +101,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
 
     const allItems = (snap?.items ?? []) as SnapItem[]
     const g = (i: SnapItem) => Number(i.total_games ?? i.games ?? 0)
-    const legendaries = allItems.filter((i) => !BOOTS.has(i.item_id))
+    const legendaries = allItems.filter((i) => !ALL_BOOTS.has(i.item_id))
     const coreItems = legendaries.slice(0, 6) // snapshot is ordered by pick rate
     const coreIds = new Set(coreItems.slice(0, 3).map((i) => i.item_id))
     const situational = legendaries
@@ -98,6 +121,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
     // live: summoner spells (top pairs) + boots + top players
     let spells: any[] = []
     let bootsRows: any[] = []
+    let supportRows: any[] = []
     let topPlayers: any[] = []
     let preciseRunes: any = null
     let buildPath: any[] = []
@@ -134,22 +158,64 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       }))
 
       const fb = cohortFilter(4)
+      // All boots (tier-2 + tier-3 upgrades); grouped into LINES below so each
+      // boot's winrate counts upgraded AND non-upgraded games as one.
       const bt = await client.query(
-        `SELECT item, games, winrate,
-                round(games::numeric / nullif(sum(games) over (), 0) * 100, 1)::float8 AS pickrate
+        `SELECT item, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
          FROM (
-           SELECT item, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
+           SELECT unnest(ARRAY[item0,item1,item2,item3,item4,item5,item6]) AS item, win
+           FROM participants WHERE champion_name = $1 AND ($3::text IS NULL OR role = $3)${fb.sql}
+         ) u
+         WHERE item = ANY($2::int[])
+         GROUP BY item`,
+        [champion, [...ALL_BOOTS], role, ...fb.params]
+      )
+      {
+        type V = { item: number; games: number; winrate: number }
+        const lines = new Map<number, { variants: V[]; games: number; wWr: number }>()
+        for (const r of bt.rows as any[]) {
+          const item = Number(r.item), games = Number(r.games), winrate = Number(r.winrate)
+          const root = bootLineRoot(item)
+          let e = lines.get(root)
+          if (!e) { e = { variants: [], games: 0, wWr: 0 }; lines.set(root, e) }
+          e.variants.push({ item, games, winrate })
+          e.games += games
+          e.wWr += games * winrate // games-weighted winrate sum → exact combined WR
+        }
+        const totalBoots = [...lines.values()].reduce((s, e) => s + e.games, 0)
+        bootsRows = [...lines.values()]
+          .map((e) => {
+            // show the variant players actually END on: tier-3 where the upgrade
+            // is near-universal (mid), tier-2 where it isn't.
+            const display = e.variants.slice().sort((a, b) => b.games - a.games)[0]
+            return {
+              item_id: display.item,
+              games: e.games,
+              winrate: Math.round((e.wWr / e.games) * 10) / 10,
+              pickrate: totalBoots ? Math.round((e.games / totalBoots) * 1000) / 10 : null,
+            }
+          })
+          .sort((a, b) => b.games - a.games)
+          .slice(0, 4)
+      }
+
+      // Support quest item (UTILITY only) — which finished World Atlas item to build.
+      if (role === "UTILITY") {
+        const fs = cohortFilter(4)
+        const su = await client.query(
+          `SELECT item, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate,
+                  round(count(*)::numeric / nullif(sum(count(*)) over (), 0) * 100, 1)::float8 AS pickrate
            FROM (
              SELECT unnest(ARRAY[item0,item1,item2,item3,item4,item5,item6]) AS item, win
-             FROM participants WHERE champion_name = $1 AND ($3::text IS NULL OR role = $3)${fb.sql}
+             FROM participants WHERE champion_name = $1 AND ($3::text IS NULL OR role = $3)${fs.sql}
            ) u
            WHERE item = ANY($2::int[])
            GROUP BY item
-         ) t
-         ORDER BY games DESC LIMIT 4`,
-        [champion, [...BOOTS], role, ...fb.params]
-      )
-      bootsRows = bt.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate), pickrate: r.pickrate != null ? Number(r.pickrate) : null }))
+           ORDER BY games DESC LIMIT 3`,
+          [champion, [...SUPPORT_ITEMS], role, ...fs.params]
+        )
+        supportRows = su.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate), pickrate: r.pickrate != null ? Number(r.pickrate) : null }))
+      }
 
       const tp = await client.query(
         `SELECT riot_id_game_name AS name, riot_id_tagline AS tag,
@@ -284,7 +350,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       buildPath,
       bootsSlot,
       spells,
-      items: { boots: bootsRows, core: coreItems, situational },
+      items: { boots: bootsRows, core: coreItems, situational, support: supportRows },
       topPlayers,
       availableRoles: roles.map((r) => ({ role: r.role, games: r.games })),
     }
