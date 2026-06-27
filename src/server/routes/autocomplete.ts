@@ -13,6 +13,8 @@ type Suggestion = {
   // Custom uploaded profile pic (premium). When set, the frontend shows it
   // instead of the LoL profile icon. Enriched from `profile_players` below.
   avatar_url?: string | null
+  // Paid tier ("premium" | "elite") for the badge — null/absent = free.
+  plan?: string | null
 }
 
 export async function autocompleteHandler(req: Request): Promise<Response> {
@@ -184,17 +186,19 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
     if (nametags.length) {
       const { data: profRows } = await supabaseAdmin
         .from("profile_players")
-        .select("nametag, avatar_url")
+        .select("nametag, avatar_url, plan")
         .in("nametag", nametags)
-        .not("avatar_url", "is", null)
       if (profRows?.length) {
-        const avatarMap = new Map<string, string>()
+        const byKey = new Map<string, { avatar_url: string | null; plan: string | null }>()
         for (const p of profRows) {
-          if (p.nametag && p.avatar_url) avatarMap.set(String(p.nametag).toLowerCase(), p.avatar_url)
+          if (p.nametag) byKey.set(String(p.nametag).toLowerCase(), { avatar_url: p.avatar_url ?? null, plan: p.plan ?? null })
         }
         for (const r of finalResults) {
-          const a = avatarMap.get(`${r.name}#${r.tag}`.toLowerCase())
-          if (a) r.avatar_url = a
+          const prof = byKey.get(`${r.name}#${r.tag}`.toLowerCase())
+          if (prof) {
+            if (prof.avatar_url) r.avatar_url = prof.avatar_url
+            if (prof.plan && prof.plan !== "free") r.plan = prof.plan // premium/elite only
+          }
         }
       }
     }
