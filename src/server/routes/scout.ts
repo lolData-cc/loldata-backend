@@ -19,12 +19,12 @@ const MAX_ACCOUNTS_PER_PLAYER = 3;
 const SLUG_LENGTH = 7;
 const OWNER_KEY_LENGTH = 32;
 
-// Per-plan lobby limits — free users 3, premium (a.k.a. PRO) 5, elite 10.
+// Per-plan lobby limits — free 1, premium (a.k.a. PRO) 2, elite 3.
 // Reads `profile_players.plan`: null/"free" → free tier.
 const LOBBY_LIMITS: Record<"free" | "premium" | "elite", number> = {
-  free: 3,
-  premium: 5,
-  elite: 10,
+  free: 1,
+  premium: 2,
+  elite: 3,
 };
 
 type PlanTier = "free" | "premium" | "elite";
@@ -147,7 +147,7 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
   }
 
   // ─── Plan quota check ────────────────────────────────────────────────
-  // Free: 3, Premium (PRO): 5, Elite: 10.
+  // Free: 1, Premium (PRO): 2, Elite: 3.
   const quota = await getLobbyQuota(userId);
   if (quota.used >= quota.limit) {
     return Response.json(
@@ -158,9 +158,9 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
         limit: quota.limit,
         upgradeHint:
           quota.plan === "free"
-            ? "Upgrade to PRO for 5 lobbies, or Elite for 10."
+            ? "Upgrade to PRO for 2 lobbies, or Elite for 3."
             : quota.plan === "premium"
-              ? "Upgrade to Elite for 10 lobbies."
+              ? "Upgrade to Elite for 3 lobbies."
               : null,
       },
       { status: 403 }
