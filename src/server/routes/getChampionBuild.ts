@@ -122,6 +122,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
     let spells: any[] = []
     let bootsRows: any[] = []
     let supportRows: any[] = []
+    let jungleRows: any[] = []
     let topPlayers: any[] = []
     let preciseRunes: any = null
     let buildPath: any[] = []
@@ -215,6 +216,27 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
           [champion, [...SUPPORT_ITEMS], role, ...fs.params]
         )
         supportRows = su.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate), pickrate: r.pickrate != null ? Number(r.pickrate) : null }))
+      }
+
+      // Jungle companion pet (JUNGLE only) — which starter pet → winrate, from the
+      // `jungle_pet` column (the STARTING choice captured in ingest from the
+      // timeline). The final inventory can't be used: the pet is consumed once its
+      // quest completes, so ~95% of games end without it → losing-biased. Only
+      // matches ingested since this shipped have it, so the sample grows over time;
+      // a small floor keeps "100% (1 game)" noise hidden until it's meaningful.
+      if (role === "JUNGLE") {
+        const fj = cohortFilter(2)
+        const ju = await client.query(
+          `SELECT jungle_pet AS item, count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate,
+                  round(count(*)::numeric / nullif(sum(count(*)) over (), 0) * 100, 1)::float8 AS pickrate
+           FROM participants
+           WHERE champion_name = $1 AND role = 'JUNGLE' AND jungle_pet IS NOT NULL${fj.sql}
+           GROUP BY jungle_pet ORDER BY games DESC`,
+          [champion, ...fj.params]
+        )
+        const rows = ju.rows.map((r: any) => ({ item_id: Number(r.item), games: Number(r.games), winrate: Number(r.winrate), pickrate: r.pickrate != null ? Number(r.pickrate) : null }))
+        const total = rows.reduce((s: number, r: any) => s + r.games, 0)
+        if (total >= 20) jungleRows = rows
       }
 
       const tp = await client.query(
@@ -350,7 +372,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       buildPath,
       bootsSlot,
       spells,
-      items: { boots: bootsRows, core: coreItems, situational, support: supportRows },
+      items: { boots: bootsRows, core: coreItems, situational, support: supportRows, jungle: jungleRows },
       topPlayers,
       availableRoles: roles.map((r) => ({ role: r.role, games: r.games })),
     }
