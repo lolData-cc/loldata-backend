@@ -29,6 +29,7 @@ import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
 import { getChampionDuosHandler } from "./routes/getChampionDuos"
 import { aiChatHandler, aiHistoryHandler } from "./routes/aiChat"
 import { getChampionBuildHandler } from "./routes/getChampionBuild"
+import { getChampionBuildStatsHandler } from "./routes/getChampionBuildStats"
 import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
 import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler, debugScoutSnapshotsHandler } from "./routes/scout";
@@ -574,6 +575,10 @@ if (pathname === "/api/ai/history" && (req.method === "GET" || req.method === "D
 
 if (pathname === "/api/champion/build" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionBuildHandler);
+}
+
+if (pathname === "/api/champion/build-stats" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getChampionBuildStatsHandler);
 }
 
 if (pathname === "/api/season_stats" && req.method === "POST") {
