@@ -171,6 +171,10 @@ function diffItems(prev: any, cur: any): Change[] {
     const b = ci[id];
     if (!a || !b) continue;
     if (b.gold?.purchasable === false) continue; // skip non-purchasable
+    // Summoner's Rift only (map 11). DDragon item.json bundles Arena / special
+    // variants (e.g. Eclipse as id 226692) whose ids won't match SR match data
+    // and would pollute the changelog. SR items carry maps["11"] === true.
+    if (b.maps && b.maps["11"] === false) continue;
     const name = b.name ?? id;
     // gold (cheaper = buff)
     if (a.gold?.total != null && b.gold?.total != null && a.gold.total !== b.gold.total) {
@@ -251,6 +255,8 @@ async function persist(patch: string, prevPatch: string, changes: Change[]): Pro
   const c = await explorerPool().connect();
   try {
     await c.query("BEGIN");
+    // clean-replace this patch's rows so a recompute drops anything now-excluded.
+    await c.query(`DELETE FROM patch_changes WHERE patch = $1`, [patch]);
     for (const ch of changes) {
       await c.query(
         `INSERT INTO patch_changes (patch, prev_patch, kind, entity_key, entity_name, field, label, old_value, new_value, direction)
