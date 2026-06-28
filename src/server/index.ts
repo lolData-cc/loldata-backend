@@ -82,6 +82,7 @@ import { analyzePlayerHandler, analyzeStatusHandler } from "./routes/analyzePlay
 import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlist";
 import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
+import { patchNotesHandler } from "./routes/patchNotes";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
 import { getLivegameStatsHandler } from "./routes/livegameStats";
@@ -157,6 +158,8 @@ setInterval(() => {
 // when nobody is looking at any lobby.
 import { startScoutPeriodicSweep } from "./services/scoutPeriodic";
 startScoutPeriodicSweep();
+import { startPatchDiffSweep } from "./services/patchDiff";
+startPatchDiffSweep();
 
 // Regenerate the tier-list snapshot every night (nothing else ever did), so the
 // tier list reflects the latest box data instead of freezing on a stale date.
@@ -847,6 +850,10 @@ if (pathname === "/api/admin/reload-snapshots" && req.method === "POST") {
 
 if (pathname === "/api/champion/otp-ranking" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionOtpRankingHandler);
+}
+
+if (pathname === "/api/patch-notes" && req.method === "GET") {
+  return withLogAndCors(req, pathname, patchNotesHandler);
 }
 
 if (pathname === "/api/player-ranks" && req.method === "POST") {

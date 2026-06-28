@@ -20,6 +20,7 @@ import {
 import { warmItemData, itemName, buildItemPool } from "./itemData";
 import { fetchChampionOtps } from "../routes/getChampionOtpRanking";
 import { getMatchDetails } from "../riot";
+import { latestPatch as latestPatchVersion } from "../services/patchDiff";
 
 export type UserContext = { puuid?: string | null; region?: string | null; nametag?: string | null };
 
@@ -212,6 +213,20 @@ export const TOOLS: Anthropic.Tool[] = [
       "The signed-in user's BEST recent ranked game — picks their standout match from the last ~20 (best performance, prioritising wins then KDA + impact) and the UI renders its full MATCH CARD to the user automatically. Call this when the user asks about their best/standout recent game ('what was my best game', 'mostrami il mio game migliore', 'my best recent match'). Takes no arguments — identity comes from the session. After calling, write a short 1-2 sentence compliment; do NOT describe the other players.",
     input_schema: { type: "object", properties: {}, required: [] },
   },
+  {
+    name: "patch_changes",
+    description:
+      "What changed in a recent PATCH — champion and item buffs/nerfs computed from the official game-data diff. Use this for ANY question about patch changes: 'was X buffed/nerfed', 'cosa è cambiato a X', 'what changed in patch 16.13', 'is X stronger this patch', 'recent changes to <item>'. Args (all optional): `champion` (that champion's changes across recent patches), `item` (an item's changes), `patch` (e.g. '16.13' → that patch's changelog); no args = the latest patch summary. Ground your answer ONLY in what it returns. The full visual changelog is on the /patch-notes page.",
+    input_schema: {
+      type: "object",
+      properties: {
+        champion: { type: "string" },
+        item: { type: "string" },
+        patch: { type: "string" },
+      },
+      required: [],
+    },
+  },
 ];
 
 // ── executors ────────────────────────────────────────────────────────────────
@@ -244,6 +259,8 @@ export function makeExecutor(
           return myPerformance(ctx);
         case "my_best_game":
           return myBestGame(ctx, input);
+        case "patch_changes":
+          return patchChanges(input);
         default:
           return { error: `Unknown tool: ${name}` };
       }
@@ -733,4 +750,78 @@ async function myBestGame(ctx: UserContext, _input: any) {
     note: "This IS the user's best recent ranked game and its match card is shown to them automatically. Write a short, specific 1-2 sentence compliment (champion, KDA, win/loss). Do NOT list the other 9 players or restate raw item ids.",
     _embed: { type: "match_card", data: card },
   };
+}
+
+// ── Patch changes (patch-awareness) ──────────────────────────────────────────
+// Reads the computed `patch_changes` changelog (the diff of consecutive DDragon
+// versions). Champion names match normalized, so "Kai'Sa" → entity_key "Kaisa".
+async function patchChanges(input: any) {
+  const champRaw = String(input?.champion ?? "").trim();
+  const itemRaw = String(input?.item ?? "").trim();
+  const patchRaw = String(input?.patch ?? "").trim();
+  const client = await explorerPool().connect();
+  try {
+    await client.query("SET statement_timeout = 12000");
+    const where: string[] = [];
+    const params: any[] = [];
+    if (champRaw) {
+      const norm = champRaw.toLowerCase().replace(/[^a-z0-9]/g, "");
+      params.push(norm);
+      where.push(`kind = 'champion' AND (regexp_replace(lower(entity_key),'[^a-z0-9]','','g') = $${params.length} OR regexp_replace(lower(entity_name),'[^a-z0-9]','','g') = $${params.length})`);
+    } else if (itemRaw) {
+      params.push(`%${itemRaw.toLowerCase()}%`);
+      where.push(`kind = 'item' AND lower(entity_name) LIKE $${params.length}`);
+    }
+    if (patchRaw) {
+      params.push(patchRaw.split(".").slice(0, 2).join(".")); // accept "16.13" or "16.13.1"
+      where.push(`patch = $${params.length}`);
+    }
+    const r = await client.query(
+      `SELECT patch, kind, entity_name, label, old_value, new_value, direction
+         FROM patch_changes
+        ${where.length ? "WHERE " + where.join(" AND ") : ""}
+        ORDER BY patch DESC, kind, entity_name, field
+        LIMIT ${champRaw || itemRaw ? 60 : 200}`,
+      params
+    );
+    const rows = r.rows as any[];
+    if (!rows.length) {
+      const lp = await latestPatchVersion();
+      return {
+        note: champRaw || itemRaw
+          ? `No tracked changes for ${champRaw || itemRaw}${patchRaw ? " in patch " + patchRaw : " in the recent patches we track"}.`
+          : `No patch changelog available yet${lp ? " (latest tracked: " + lp + ")" : ""}.`,
+      };
+    }
+    const fmtRow = (x: any) => ({ name: x.entity_name, change: `${x.label}: ${x.old_value} → ${x.new_value}`, direction: x.direction });
+    if (champRaw || itemRaw) {
+      const byPatch = new Map<string, any[]>();
+      for (const x of rows) {
+        if (!byPatch.has(x.patch)) byPatch.set(x.patch, []);
+        byPatch.get(x.patch)!.push(fmtRow(x));
+      }
+      return {
+        subject: rows[0].entity_name,
+        patches: [...byPatch.entries()].map(([p, list]) => ({ patch: p, changes: list })),
+        hint: "Say whether it was net buffed or nerfed in the most recent patch that touched it, then summarise the concrete changes. Don't invent anything beyond these.",
+      };
+    }
+    // whole-patch changelog → summarise (the /patch-notes page shows the full list).
+    const thePatch = rows[0].patch;
+    const inPatch = rows.filter((x) => x.patch === thePatch);
+    return {
+      patch: thePatch,
+      totals: {
+        buffs: inPatch.filter((x) => x.direction === "buff").length,
+        nerfs: inPatch.filter((x) => x.direction === "nerf").length,
+        championRows: inPatch.filter((x) => x.kind === "champion").length,
+        itemRows: inPatch.filter((x) => x.kind === "item").length,
+      },
+      championChanges: inPatch.filter((x) => x.kind === "champion").slice(0, 30).map(fmtRow),
+      itemChanges: inPatch.filter((x) => x.kind === "item").slice(0, 20).map(fmtRow),
+      note: "Summarise the patch at a high level (notable buffs/nerfs). The full changelog is on the /patch-notes page; keep it tight.",
+    };
+  } finally {
+    client.release();
+  }
 }

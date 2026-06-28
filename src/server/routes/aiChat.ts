@@ -51,7 +51,7 @@ WHAT YOU CAN DO — READ-ONLY
 
 HOW YOU WORK
 - Pick the tool(s) that answer the question, call them, then write the answer from what they return. You may call several.
-- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_runes = best keystones + rune trees for a champion (use for any keystone/rune question). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves). my_best_game = the signed-in user's best recent ranked game (only when they ask for their best/standout recent game).
+- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_runes = best keystones + rune trees for a champion (use for any keystone/rune question). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves). my_best_game = the signed-in user's best recent ranked game (only when they ask for their best/standout recent game). patch_changes = champion/item buffs & nerfs in a recent patch (use for "was X buffed/nerfed", "what changed in patch Y", "is X stronger now").
 
 VISUALS — some tools render a widget to the user automatically (you do NOT draw it in text):
 - best_runes shows the champion's full RUNE PAGE as a visual rune tree. So explain WHY (keystone choice, key runes, trade-offs) in prose — do not list every rune/shard or draw ASCII.
@@ -112,7 +112,7 @@ function toMessages(body: any): Anthropic.MessageParam[] {
   return out;
 }
 
-type Action = { label: string; href: string; kind: "champion" | "pros" | "scout" | "summoner" };
+type Action = { label: string; href: string; kind: "champion" | "pros" | "scout" | "summoner" | "patch" };
 
 // Clean, contextual CTA buttons derived from WHICH tools the agent used — so the
 // links are always relevant and correct (no model-invented hrefs). Capped at 3.
@@ -130,6 +130,7 @@ async function deriveActions(log: { name: string; input: any }[], ctx: UserConte
   let champ: string | null = null;
   let topPlayers = false;
   let myPerf = false;
+  let patchSeen = false;
   for (const c of log) {
     if (CHAMP_TOOLS.has(c.name) && c.input?.champion) {
       const canon = await resolveChamp(String(c.input.champion));
@@ -137,6 +138,7 @@ async function deriveActions(log: { name: string; input: any }[], ctx: UserConte
     }
     if (c.name === "champion_top_players") topPlayers = true;
     if (c.name === "my_performance") myPerf = true;
+    if (c.name === "patch_changes") patchSeen = true;
   }
 
   if (myPerf && ctx.puuid && ctx.nametag) {
@@ -148,6 +150,7 @@ async function deriveActions(log: { name: string; input: any }[], ctx: UserConte
     if (topPlayers) add({ label: `Top ${champ} players`, href: `${championHref(champ)}/pros`, kind: "pros" });
   }
   if (topPlayers) add({ label: "Compare players on Scout", href: "/scout/new", kind: "scout" });
+  if (patchSeen) add({ label: "Patch notes", href: "/patch-notes", kind: "patch" });
 
   return out.slice(0, 3);
 }
