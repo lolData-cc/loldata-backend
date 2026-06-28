@@ -19,6 +19,7 @@ import {
 } from "../explorer/champClass";
 import { warmItemData, itemName, buildItemPool } from "./itemData";
 import { fetchChampionOtps } from "../routes/getChampionOtpRanking";
+import { getMatchDetails } from "../riot";
 
 export type UserContext = { puuid?: string | null; region?: string | null; nametag?: string | null };
 
@@ -205,34 +206,84 @@ export const TOOLS: Anthropic.Tool[] = [
       "The signed-in user's OWN recent form versus their season average: winrate, KDA and CS over their last ranked games compared to the season. ONLY call this when the user asks about THEIR OWN play ('how am I doing', 'am I improving', 'my recent form'). Takes no arguments — identity comes from the session.",
     input_schema: { type: "object", properties: {}, required: [] },
   },
+  {
+    name: "my_best_game",
+    description:
+      "The signed-in user's BEST recent ranked game — picks their standout match from the last ~20 (best performance, prioritising wins then KDA + impact) and the UI renders its full MATCH CARD to the user automatically. Call this when the user asks about their best/standout recent game ('what was my best game', 'mostrami il mio game migliore', 'my best recent match'). Takes no arguments — identity comes from the session. After calling, write a short 1-2 sentence compliment; do NOT describe the other players.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
 ];
 
 // ── executors ────────────────────────────────────────────────────────────────
+// The log captures {name, input, output} per tool call so the route can derive
+// rich `embeds` (rune page, match card) from real tool results afterwards.
+export type ToolLogEntry = { name: string; input: any; output?: any };
+
 export function makeExecutor(
   ctx: UserContext,
-  log?: { name: string; input: any }[]
+  log?: ToolLogEntry[]
 ): (name: string, input: any) => Promise<unknown> {
   return async (name, input) => {
-    log?.push({ name, input });
-    switch (name) {
-      case "champion_overview":
-        return championOverview(input);
-      case "best_items":
-        return bestItems(input);
-      case "best_teammates":
-        return bestTeammates(input);
-      case "best_runes":
-        return bestRunes(input);
-      case "matchups":
-        return matchups(input);
-      case "champion_top_players":
-        return championTopPlayers(input);
-      case "my_performance":
-        return myPerformance(ctx);
-      default:
-        return { error: `Unknown tool: ${name}` };
+    const entry: ToolLogEntry = { name, input };
+    log?.push(entry);
+    const run = async (): Promise<unknown> => {
+      switch (name) {
+        case "champion_overview":
+          return championOverview(input);
+        case "best_items":
+          return bestItems(input);
+        case "best_teammates":
+          return bestTeammates(input);
+        case "best_runes":
+          return bestRunes(input);
+        case "matchups":
+          return matchups(input);
+        case "champion_top_players":
+          return championTopPlayers(input);
+        case "my_performance":
+          return myPerformance(ctx);
+        case "my_best_game":
+          return myBestGame(ctx, input);
+        default:
+          return { error: `Unknown tool: ${name}` };
+      }
+    };
+    const output = await run();
+    entry.output = output;
+    // Keep the model's context lean: `_embed` carries a rich UI payload (rune
+    // page, match card) meant for the FRONTEND only. Keep it in the log (so the
+    // route can collect embeds) but strip it from what the model reads.
+    if (output && typeof output === "object" && (output as any)._embed !== undefined) {
+      const { _embed, ...rest } = output as any;
+      return rest;
     }
+    return output;
   };
+}
+
+// Collect the rich embeds produced by the tools the agent ran (rune page, match
+// card). Reads each log entry's captured output `_embed`. Deduped, capped.
+export type AiEmbed =
+  | { type: "rune_page"; data: AiRunePage }
+  | { type: "match_card"; data: any };
+
+export function collectEmbeds(log: ToolLogEntry[]): AiEmbed[] {
+  const out: AiEmbed[] = [];
+  const seen = new Set<string>();
+  for (const e of log) {
+    const emb = (e.output as any)?._embed;
+    if (!emb || !emb.type) continue;
+    const key =
+      emb.type === "rune_page"
+        ? `rune:${emb.data?.champion}:${emb.data?.role ?? ""}`
+        : emb.type === "match_card"
+        ? `match:${emb.data?.matchId}`
+        : JSON.stringify(emb).slice(0, 80);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(emb);
+  }
+  return out.slice(0, 3);
 }
 
 async function championTopPlayers(input: any) {
@@ -306,6 +357,9 @@ async function bestRunes(input: any) {
       role ? [champ, QUEUES, role] : [champ, QUEUES]
     );
     const t = tree.rows[0];
+    // Full precise rune page → rendered as a standard rune tree in the chat.
+    // Null when there's no precise-rune sample yet (a growing subset of games).
+    const page = await fetchPreciseRunePage(champ, role);
     return {
       champion: champ,
       role: role ?? "main role",
@@ -316,7 +370,10 @@ async function bestRunes(input: any) {
         games: Number(r.games),
       })),
       most_common_trees: t ? `${STYLE_NAME[Number(t.prim)] ?? t.prim} (primary) + ${STYLE_NAME[Number(t.sub)] ?? t.sub} (secondary)` : null,
-      hint: "Lead with the highest-pickrate keystone as the default pick; call out a notably higher-winrate alternative if one stands out.",
+      hint: page
+        ? "The full rune page is shown to the user automatically as a rune tree. Lead with the highest-pickrate keystone and call out a notably higher-winrate alternative; DON'T list every rune in text."
+        : "Lead with the highest-pickrate keystone as the default pick; call out a notably higher-winrate alternative if one stands out.",
+      ...(page ? { _embed: { type: "rune_page", data: page } } : {}),
     };
   } finally {
     client.release();
@@ -525,4 +582,155 @@ async function myPerformance(ctx: UserContext) {
   } finally {
     client.release();
   }
+}
+
+// ── Precise full rune page (for the rune_page embed) ─────────────────────────
+// Mirrors the precise-rune query in getChampionBuild.ts: the most-played full
+// page for a champion (+ role) from the perk_*/stat_perks arrays. Returns null
+// when the champion has no precise-rune sample yet (a growing subset of games).
+export type AiRunePage = {
+  champion: string;
+  role: string | null;
+  keystone: number;
+  primaryStyle: number;
+  subStyle: number;
+  primary: number[];   // full primary tree perks (keystone + 3 minors)
+  secondary: number[]; // 2 secondary-tree minors
+  shards: number[];    // 3 stat shards
+  games: number;
+  winrate: number;
+};
+
+export async function fetchPreciseRunePage(champ: string, role: string | null): Promise<AiRunePage | null> {
+  const client = await explorerPool().connect();
+  try {
+    await client.query("SET statement_timeout = 12000");
+    const r = await client.query(
+      `SELECT perk_keystone AS keystone, perk_primary_style AS primary_style, perk_sub_style AS sub_style,
+              perk_primary, perk_secondary, stat_perks,
+              count(*)::int AS games, round(avg((win)::int) * 100, 1)::float8 AS winrate
+         FROM participants
+        WHERE champion_name = $1 ${role ? "AND role = $2" : ""}
+          AND perk_primary IS NOT NULL AND perk_primary_style IS NOT NULL
+        GROUP BY 1, 2, 3, 4, 5, 6
+        ORDER BY games DESC
+        LIMIT 1`,
+      role ? [champ, role] : [champ]
+    );
+    const p = (r.rows as any[])[0];
+    if (!p) return null;
+    return {
+      champion: champ,
+      role: role ?? null,
+      keystone: Number(p.keystone),
+      primaryStyle: Number(p.primary_style),
+      subStyle: Number(p.sub_style),
+      primary: ((p.perk_primary as number[]) ?? []).map(Number),
+      secondary: ((p.perk_secondary as number[]) ?? []).map(Number),
+      shards: ((p.stat_perks as number[]) ?? []).map(Number),
+      games: Number(p.games),
+      winrate: Number(p.winrate),
+    };
+  } finally {
+    client.release();
+  }
+}
+
+// ── "Best recent game" → full MatchCardData for the match_card embed ─────────
+const QUEUE_LABEL: Record<number, string> = { 420: "Ranked Solo/Duo", 440: "Ranked Flex" };
+
+// Map a Riot match-v5 object + the user's puuid into the frontend MatchCardData
+// shape (the same fields the scout feed assembles), so <MatchCard> renders it.
+function assembleMatchCard(match: any, puuid: string, region: string) {
+  const info = match?.info ?? {};
+  const meta = match?.metadata ?? {};
+  const parts: any[] = info.participants ?? [];
+  const me = parts.find((p) => p.puuid === puuid) ?? {};
+  const platform = String(meta.matchId ?? "").split("_")[0] || null; // e.g. "EUW1"
+  const items = [me.item0, me.item1, me.item2, me.item3, me.item4, me.item5, me.item6].map((x) => Number(x ?? 0));
+  const dur = Number(info.gameDuration ?? 0);
+  return {
+    matchId: meta.matchId ?? "",
+    queueLabel: QUEUE_LABEL[Number(info.queueId)] ?? "Ranked",
+    win: !!me.win,
+    isRemake: dur > 0 && dur < 300,
+    gameDurationSeconds: dur,
+    gameCreationMs: Number(info.gameStartTimestamp ?? info.gameCreation ?? 0),
+    championName: me.championName ?? "Unknown",
+    championLevel: me.champLevel ?? null,
+    keystoneId: me.perks?.styles?.[0]?.selections?.[0]?.perk ?? null,
+    secondaryStyleId: me.perks?.styles?.[1]?.style ?? null,
+    kills: Number(me.kills ?? 0),
+    deaths: Number(me.deaths ?? 0),
+    assists: Number(me.assists ?? 0),
+    cs: Number(me.totalMinionsKilled ?? 0) + Number(me.neutralMinionsKilled ?? 0),
+    role: me.teamPosition || me.individualPosition || null,
+    gold: me.goldEarned ?? null,
+    items,
+    region: region.toUpperCase(),
+    highlightPuuid: puuid,
+    allParticipants: parts.map((p) => ({
+      puuid: p.puuid,
+      summonerName: p.riotIdGameName ?? p.summonerName ?? null,
+      riotTagline: p.riotIdTagline ?? null,
+      championName: p.championName ?? null,
+      teamId: p.teamId ?? null,
+      platform,
+      win: !!p.win,
+      kills: Number(p.kills ?? 0),
+      deaths: Number(p.deaths ?? 0),
+      assists: Number(p.assists ?? 0),
+    })),
+  };
+}
+
+async function myBestGame(ctx: UserContext, _input: any) {
+  if (!ctx?.puuid || !ctx?.region) {
+    return { error: "not_linked", message: "The user is not signed in or has not linked a Riot account. Tell them to sign in and link their account to use this." };
+  }
+  // 1. recent ranked games from the box (cheap, one query)
+  const client = await explorerPool().connect();
+  let rows: any[];
+  try {
+    await client.query("SET statement_timeout = 12000");
+    const r = await client.query(
+      `SELECT p.match_id, m.game_creation, p.champion_name, p.win, p.kills, p.deaths, p.assists
+         FROM participants p JOIN matches m ON m.match_id = p.match_id
+        WHERE p.puuid = $1 AND m.queue_id = ANY($2)
+        ORDER BY m.game_creation DESC
+        LIMIT 20`,
+      [ctx.puuid, QUEUES]
+    );
+    rows = r.rows as any[];
+  } finally {
+    client.release();
+  }
+  if (!rows.length) {
+    return { note: "No recent ranked games found in our database for this account yet — play a ranked game and refresh the profile page." };
+  }
+  // 2. "best" = prioritise wins, then KDA + raw impact (kills + assists).
+  const score = (g: any) => {
+    const k = Number(g.kills) || 0, d = Number(g.deaths) || 0, a = Number(g.assists) || 0;
+    const kda = (k + a) / Math.max(1, d);
+    return (g.win ? 1000 : 0) + kda * 12 + (k + a);
+  };
+  const best = rows.slice().sort((x, y) => score(y) - score(x))[0];
+  // 3. fetch that one match in full from Riot (all 10 players) + assemble the card.
+  let card: any = null;
+  try {
+    const match = await getMatchDetails(best.match_id, ctx.region);
+    card = assembleMatchCard(match, ctx.puuid, ctx.region);
+  } catch {
+    return { note: "Found your best recent game but couldn't load its full details right now — try again in a moment." };
+  }
+  // The full card goes to the frontend via `_embed` (stripped from the model's
+  // view); the model only gets a short summary to write a compliment from.
+  return {
+    matchId: best.match_id,
+    champion: best.champion_name,
+    win: !!best.win,
+    kda: `${best.kills}/${best.deaths}/${best.assists}`,
+    note: "This IS the user's best recent ranked game and its match card is shown to them automatically. Write a short, specific 1-2 sentence compliment (champion, KDA, win/loss). Do NOT list the other 9 players or restate raw item ids.",
+    _embed: { type: "match_card", data: card },
+  };
 }

@@ -7,7 +7,7 @@
 
 import { explorerPool } from "../explorer/pool";
 
-export type StoredMsg = { role: "user" | "assistant"; content: string; actions?: unknown };
+export type StoredMsg = { role: "user" | "assistant"; content: string; actions?: unknown; embeds?: unknown };
 
 let _ensured: Promise<void> | null = null;
 function ensure(): Promise<void> {
@@ -22,8 +22,10 @@ function ensure(): Promise<void> {
             role        text NOT NULL,
             content     text NOT NULL,
             actions     jsonb,
+            embeds      jsonb,
             created_at  timestamptz NOT NULL DEFAULT now()
           );
+          ALTER TABLE ai_chat_messages ADD COLUMN IF NOT EXISTS embeds jsonb;
           CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_messages (user_id, id);
         `);
       } finally {
@@ -43,13 +45,13 @@ export async function loadHistory(userId: string, limit = 100): Promise<StoredMs
     const c = await explorerPool().connect();
     try {
       const r = await c.query(
-        `SELECT role, content, actions FROM ai_chat_messages
+        `SELECT role, content, actions, embeds FROM ai_chat_messages
           WHERE user_id = $1 ORDER BY id DESC LIMIT $2`,
         [userId, limit]
       );
       return r.rows
         .reverse()
-        .map((x: any) => ({ role: x.role, content: x.content, actions: x.actions ?? undefined }));
+        .map((x: any) => ({ role: x.role, content: x.content, actions: x.actions ?? undefined, embeds: x.embeds ?? undefined }));
     } finally {
       c.release();
     }
@@ -62,16 +64,18 @@ export async function loadHistory(userId: string, limit = 100): Promise<StoredMs
 export async function saveTurn(
   userId: string,
   userText: string,
-  assistant: { content: string; actions?: unknown }
+  assistant: { content: string; actions?: unknown; embeds?: unknown }
 ): Promise<void> {
   try {
     await ensure();
     const c = await explorerPool().connect();
     try {
       await c.query(
-        `INSERT INTO ai_chat_messages (user_id, role, content, actions)
-         VALUES ($1, 'user', $2, NULL), ($1, 'assistant', $3, $4)`,
-        [userId, userText, assistant.content, assistant.actions ? JSON.stringify(assistant.actions) : null]
+        `INSERT INTO ai_chat_messages (user_id, role, content, actions, embeds)
+         VALUES ($1, 'user', $2, NULL, NULL), ($1, 'assistant', $3, $4, $5)`,
+        [userId, userText, assistant.content,
+         assistant.actions ? JSON.stringify(assistant.actions) : null,
+         assistant.embeds ? JSON.stringify(assistant.embeds) : null]
       );
     } finally {
       c.release();

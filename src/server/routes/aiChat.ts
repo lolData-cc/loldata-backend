@@ -15,7 +15,9 @@ import {
   resolveChamp,
   summonerHrefFromNametag,
   championHref,
+  collectEmbeds,
   type UserContext,
+  type ToolLogEntry,
 } from "../ai/tools";
 import { warmChampClasses } from "../explorer/champClass";
 import { warmItemData } from "../ai/itemData";
@@ -49,7 +51,12 @@ WHAT YOU CAN DO — READ-ONLY
 
 HOW YOU WORK
 - Pick the tool(s) that answer the question, call them, then write the answer from what they return. You may call several.
-- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_runes = best keystones + rune trees for a champion (use for any keystone/rune question). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves).
+- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_runes = best keystones + rune trees for a champion (use for any keystone/rune question). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves). my_best_game = the signed-in user's best recent ranked game (only when they ask for their best/standout recent game).
+
+VISUALS — some tools render a widget to the user automatically (you do NOT draw it in text):
+- best_runes shows the champion's full RUNE PAGE as a visual rune tree. So explain WHY (keystone choice, key runes, trade-offs) in prose — do not list every rune/shard or draw ASCII.
+- my_best_game shows that game's full MATCH CARD. So just add a short, specific compliment about the performance — do not restate the scoreboard or item ids.
+Keep your text complementary to the widget, never a redundant text dump of it.
 
 THE SITE — route people to it
 - Champion page (/champions/<name>): build, duos, counters, statistics, and a "pros" tab = the ranked one-trick list.
@@ -177,16 +184,19 @@ export async function aiChatHandler(req: Request): Promise<Response> {
   const userId = await userIdFromReq(req);
 
   try {
-    const toolLog: { name: string; input: any }[] = [];
+    const toolLog: ToolLogEntry[] = [];
     const answer = await runAgent(SYSTEM, messages, TOOLS, makeExecutor(ctx, toolLog));
     const actions = await deriveActions(toolLog, ctx);
+    // Rich inline widgets (rune page, best-game match card) derived from the
+    // real tool outputs — the frontend renders these between text and actions.
+    const embeds = collectEmbeds(toolLog);
     // Persist the turn per-account (fire-and-forget; never blocks the reply).
     if (userId && answer) {
       const lastUser = messages[messages.length - 1];
       const userText = typeof lastUser?.content === "string" ? lastUser.content : "";
-      if (userText) void saveTurn(userId, userText, { content: answer, actions });
+      if (userText) void saveTurn(userId, userText, { content: answer, actions, embeds });
     }
-    return Response.json({ answer: answer || "I couldn't find an answer to that.", actions });
+    return Response.json({ answer: answer || "I couldn't find an answer to that.", actions, embeds });
   } catch (e: any) {
     const msg = String(e?.message ?? e);
     console.error("[ai/chat] error:", msg, "| model:", AI_MODEL);
