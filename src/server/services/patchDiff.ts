@@ -416,6 +416,29 @@ export async function listPatches(): Promise<string[]> {
   }
 }
 
+// Compact net-direction map for the LATEST patch — powers the small buff/nerf/
+// adjust badge on every champion + item icon across the site. Net per entity:
+// more buffs than nerfs → "buff", more nerfs → "nerf", otherwise "adjust".
+export async function latestPatchMap(): Promise<{ patch: string | null; champions: Record<string, string>; items: Record<string, string> }> {
+  const patches = await listPatches();
+  const patch = patches[0] ?? null;
+  if (!patch) return { patch: null, champions: {}, items: {} };
+  const rows = await patchChangesFor({ patch, limit: 5000 });
+  const agg = (kind: string): Record<string, string> => {
+    const tally: Record<string, { b: number; n: number }> = {};
+    for (const r of rows) {
+      if (r.kind !== kind) continue;
+      if (!tally[r.entity_key]) tally[r.entity_key] = { b: 0, n: 0 };
+      if (r.direction === "buff") tally[r.entity_key].b++;
+      else if (r.direction === "nerf") tally[r.entity_key].n++;
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(tally)) out[k] = v.b > v.n ? "buff" : v.n > v.b ? "nerf" : "adjust";
+    return out;
+  };
+  return { patch, champions: agg("champion"), items: agg("item") };
+}
+
 export async function proseFor(patch: string): Promise<Record<string, string>> {
   await ensure();
   const c = await explorerPool().connect();

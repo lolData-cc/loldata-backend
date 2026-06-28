@@ -82,7 +82,7 @@ import { analyzePlayerHandler, analyzeStatusHandler } from "./routes/analyzePlay
 import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlist";
 import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
-import { patchNotesHandler } from "./routes/patchNotes";
+import { patchNotesHandler, patchLatestMapHandler } from "./routes/patchNotes";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
 import { getLivegameStatsHandler } from "./routes/livegameStats";
@@ -850,6 +850,10 @@ if (pathname === "/api/admin/reload-snapshots" && req.method === "POST") {
 
 if (pathname === "/api/champion/otp-ranking" && req.method === "POST") {
   return withLogAndCors(req, pathname, getChampionOtpRankingHandler);
+}
+
+if (pathname === "/api/patch-notes/latest-map" && req.method === "GET") {
+  return withLogAndCors(req, pathname, patchLatestMapHandler);
 }
 
 if (pathname === "/api/patch-notes" && req.method === "GET") {

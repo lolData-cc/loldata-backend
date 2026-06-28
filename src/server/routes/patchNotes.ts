@@ -3,7 +3,18 @@
 // page: the patch list (selector), the change rows, and any scraped champion
 // prose. Read-only — the diff sweep (startPatchDiffSweep) populates the data.
 
-import { listPatches, patchChangesFor, proseFor, startPatchDiffSweep } from "../services/patchDiff";
+import { listPatches, patchChangesFor, proseFor, startPatchDiffSweep, latestPatchMap } from "../services/patchDiff";
+
+// GET /api/patch-notes/latest-map → compact { patch, champions:{key:dir}, items:{id:dir} }
+// for the site-wide buff/nerf/adjust icon badges. Cheap; cached client-side.
+export async function patchLatestMapHandler(_req: Request): Promise<Response> {
+  try {
+    return Response.json(await latestPatchMap())
+  } catch (err) {
+    console.error("patch latest-map error:", err)
+    return new Response("Internal server error", { status: 500 })
+  }
+}
 
 export async function patchNotesHandler(req: Request): Promise<Response> {
   try {
