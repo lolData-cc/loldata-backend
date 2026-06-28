@@ -405,7 +405,11 @@ export async function listPatches(): Promise<string[]> {
   await ensure();
   const c = await explorerPool().connect();
   try {
-    const r = await c.query(`SELECT patch FROM patch_diff_runs ORDER BY computed_at DESC`);
+    // newest patch first by NUMBER (16.13 > 16.12 > 16.9), not by compute time.
+    const r = await c.query(
+      `SELECT patch FROM patch_diff_runs
+        ORDER BY string_to_array(patch, '.')::int[] DESC`
+    );
     return (r.rows as any[]).map((x) => x.patch);
   } finally {
     c.release();
