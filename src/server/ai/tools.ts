@@ -18,6 +18,7 @@ import {
   CHAMP_CATEGORIES,
 } from "../explorer/champClass";
 import { warmItemData, itemName, buildItemPool } from "./itemData";
+import { fetchChampionOtps } from "../routes/getChampionOtpRanking";
 
 export type UserContext = { puuid?: string | null; region?: string | null; nametag?: string | null };
 
@@ -189,12 +190,11 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "champion_top_players",
     description:
-      "Top-performing players on a champion in our data: in-game name/tag, winrate, games, region, plus a ready-made `href` to each player's profile page. Use this to name a strong player to follow for a champion, or to answer 'who is the best/strongest <champion> player'. When you cite a player, link them with a markdown link using their exact `href` (e.g. [Name](href)). These are top performers in our sample — for the authoritative ranked one-trick list, the UI will offer a button to the champion's players page.",
+      "The champion's authoritative ranked one-trick (OTP) leaderboard — the SAME list shown on the champion's players page. These are Master+ players who main the champion, ORDERED BY RANK (highest elo first), NOT by winrate. Use this to answer 'who is the best/strongest <champion> player': the FIRST player in the list IS the best — do not re-rank by winrate. Each row has rank position, name/tag, elo (tier + LP), champion games, winrate, region and a ready-made `href`. Cite a player with a markdown link using their exact `href` (e.g. [Name](href)).",
     input_schema: {
       type: "object",
       properties: {
         champion: { type: "string" },
-        role: { type: "string", enum: ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"] },
       },
       required: ["champion"],
     },
@@ -238,47 +238,31 @@ export function makeExecutor(
 async function championTopPlayers(input: any) {
   const champ = await resolveChamp(String(input?.champion ?? ""));
   if (!champ) return { error: "unknown_champion", champion: input?.champion };
-  const role = normRole(input?.role);
-  const client = await explorerPool().connect();
-  try {
-    await client.query("SET statement_timeout = 12000");
-    const r = await client.query(
-      `SELECT p.riot_id_game_name AS name, p.riot_id_tagline AS tag,
-              count(*)::int AS games,
-              round(avg((p.win)::int) * 100, 1)::float8 AS winrate,
-              (array_agg(m.platform ORDER BY m.game_creation DESC))[1] AS platform
-         FROM participants p JOIN matches m ON m.match_id = p.match_id
-        WHERE p.champion_name = $1
-          AND p.riot_id_game_name IS NOT NULL AND p.riot_id_game_name <> ''
-          AND m.queue_id = ANY($2)
-          ${role ? "AND p.role = $4" : ""}
-        GROUP BY p.riot_id_game_name, p.riot_id_tagline
-        HAVING count(*) >= $3
-        ORDER BY avg((p.win)::int) DESC, count(*) DESC
-        LIMIT 8`,
-      role ? [champ, QUEUES, 20, role] : [champ, QUEUES, 20]
-    );
-    if (!r.rows.length) {
-      return { champion: champ, note: "Not enough tracked games to surface standout players for this champion yet." };
-    }
+  // Reuse the champion page's exact OTP ranking: Master+ one-tricks ordered by
+  // RANK (tier, then LP) — NOT by winrate. otps[0] is the best / highest-elo
+  // player. This keeps the chatbot and the OTP page in lockstep, and stops the
+  // old "highest winrate at lower elo" answer.
+  const otps = await fetchChampionOtps(champ, "ALL", 8);
+  if (!otps.length) {
     return {
       champion: champ,
-      note: "Top performers in our sample (by winrate); the UI offers a button to the full ranked one-trick list.",
-      players: r.rows.map((x: any) => {
-        const region = regionFromPlatform(x.platform);
-        return {
-          name: x.name,
-          tag: x.tag,
-          region,
-          games: Number(x.games),
-          winrate: `${Number(x.winrate).toFixed(1)}%`,
-          href: summonerHref(x.name, x.tag, region),
-        };
-      }),
+      note: "No ranked one-trick (Master+) for this champion in our data yet — too few games, or no high-elo main found.",
     };
-  } finally {
-    client.release();
   }
+  return {
+    champion: champ,
+    note: "The champion's ranked one-trick leaderboard (Master+), ordered by rank — highest elo first. players[0] IS the best one-trick; do not re-order by winrate.",
+    players: otps.map((p: any) => ({
+      rank: p.rank,
+      name: p.name,
+      tag: p.tag,
+      elo: `${p.tier}${p.division ? " " + p.division : ""} ${p.lp} LP`.trim(),
+      region: p.region,
+      champGames: p.champGames,
+      winrate: `${p.champWinrate}%`,
+      href: summonerHref(p.name, p.tag, String(p.region).toLowerCase()),
+    })),
+  };
 }
 
 // Keystone + style id → display name (fixed set, rarely changes — no DDragon fetch).
