@@ -12,6 +12,8 @@
 // lane/river/jungle zones.
 
 import { itemName, buildItemPool } from "./itemData";
+import { classesOf, damageOf, normChamp } from "../explorer/champClass";
+import { HEAVY_CC, ENGAGE } from "./champTags";
 
 type Pos = { x: number; y: number };
 const MAP = 14820;
@@ -44,6 +46,22 @@ function laneSideForRole(role: string): "topside" | "botside" | "mid" | "jungle"
   if (r === "MIDDLE") return "mid";
   if (r === "BOTTOM" || r === "UTILITY") return "botside";
   return "jungle";
+}
+
+// Approx SR turret positions (outer + inner per lane, both teams) for DIVE
+// detection. `team` = the team that OWNS the turret.
+const TURRETS: { x: number; y: number; team: number }[] = [
+  { x: 981, y: 10441, team: 100 }, { x: 1512, y: 6699, team: 100 },   // blue top outer/inner
+  { x: 5846, y: 6396, team: 100 }, { x: 5048, y: 4812, team: 100 },   // blue mid outer/inner
+  { x: 10504, y: 1029, team: 100 }, { x: 6919, y: 1483, team: 100 },  // blue bot outer/inner
+  { x: 4318, y: 13875, team: 200 }, { x: 7943, y: 13411, team: 200 }, // red top outer/inner
+  { x: 8955, y: 8510, team: 200 }, { x: 9767, y: 10113, team: 200 },  // red mid outer/inner
+  { x: 13866, y: 4505, team: 200 }, { x: 13327, y: 8226, team: 200 }, // red bot outer/inner
+];
+// "enemy turret" = died diving / overextended; "own turret" = collapsed/dove on under tower.
+function turretAt(p: Pos, myTeam: number): "own turret" | "enemy turret" | null {
+  for (const t of TURRETS) if (dist(p, t) < 1150) return t.team === myTeam ? "own turret" : "enemy turret";
+  return null;
 }
 
 export type PMeta = {
@@ -228,6 +246,7 @@ export function analyzeGameTimeline(
       enemies_involved: Math.max(1, enemiesInvolved),
       killer: champById.get(k.killerId) ?? "minion/turret",
       in_lane: inLane(zone, side),
+      under_turret: k.pos ? turretAt(k.pos, myTeam) : null,
       shutdown_given: k.shutdown, gold_diff_at_death: oppo ? myGold - oppGold : null,
       phase: k.t < 14 * 60000 ? "early" : k.t < 25 * 60000 ? "mid" : "late",
     };
@@ -378,8 +397,73 @@ export function analyzeGameTimeline(
     pct_time_off_lane_pre14: framesPre14 ? Math.round((roamFramesPre14 / framesPre14) * 100) : null,
   };
 
-  // ── FLAGS (pre-digested mistakes, each with its number) ──────────────────────
+  // ── COMPS (categorize both teams: AD/AP, CC, engage, archetype) ──────────────
+  const classifyComp = (meta: PMeta[]) => {
+    let ap = 0, ad = 0, hybrid = 0, assassins = 0, tanks = 0, marksmen = 0, mages = 0, fighters = 0, heavy_cc = 0;
+    const engage: string[] = [];
+    for (const p of meta) {
+      const dmg = damageOf(p.champion);
+      if (dmg === "AP") ap++; else if (dmg === "AD") ad++; else if (dmg === "Hybrid") hybrid++;
+      const cls = classesOf(p.champion);
+      if (cls.includes("Assassin")) assassins++;
+      if (cls.includes("Tank")) tanks++;
+      if (cls.includes("Marksman")) marksmen++;
+      if (cls.includes("Mage")) mages++;
+      if (cls.includes("Fighter")) fighters++;
+      const n = normChamp(p.champion);
+      if (HEAVY_CC.has(n)) heavy_cc++;
+      if (ENGAGE.has(n)) engage.push(p.champion);
+    }
+    const tags: string[] = [];
+    if (ap >= 3) tags.push("AP-heavy");
+    if (ad >= 4) tags.push("AD-heavy");
+    if (heavy_cc >= 3) tags.push("heavy CC");
+    if (engage.length >= 2) tags.push("strong engage");
+    if (assassins >= 2) tags.push("assassin/burst threat");
+    if (assassins + engage.length >= 3) tags.push("dive comp");
+    if (tanks >= 2 && marksmen >= 1) tags.push("front-to-back");
+    return { ap, ad, hybrid, assassins, tanks, marksmen, mages, fighters, heavy_cc, engage, tags };
+  };
+  const allyMeta = parts.filter((p) => p.teamId === myTeam);
+  const enemyMeta = parts.filter((p) => p.teamId !== myTeam);
+  const ally_comp = classifyComp(allyMeta);
+  const enemy_comp = classifyComp(enemyMeta);
   const carry = ["TOP", "MIDDLE", "BOTTOM"].includes(me.role.toUpperCase());
+
+  // ── ITEMIZATION vs the enemy comp (the situational-item check) ───────────────
+  const bought = new Set(itemBuys.map((b) => b.id));
+  const myClasses = classesOf(me.champion);
+  const isADC = myClasses.includes("Marksman");
+  const isJg = me.role.toUpperCase() === "JUNGLE";
+  const MERCS = 3111, STEELCAPS = 3047, QSS = [3140, 3139];
+  const DEFENSIVE = [3157, 3026, 3156, 3053, 3814, 6035, 3193, 3143, 3065, 3091];
+  const hasDefensive = DEFENSIVE.some((id) => bought.has(id)) || QSS.some((id) => bought.has(id));
+  const itemization_check: Array<{ issue: string; detail: string }> = [];
+  if ((enemy_comp.heavy_cc >= 2 || enemy_comp.ap >= 3) && !bought.has(MERCS) && !isADC && !isJg)
+    itemization_check.push({ issue: "no Mercury's Treads", detail: `enemy had ${enemy_comp.heavy_cc} hard-CC + ${enemy_comp.ap} AP but you didn't build Mercs` });
+  if (enemy_comp.ad >= 4 && !bought.has(STEELCAPS) && !isADC && !isJg)
+    itemization_check.push({ issue: "no Plated Steelcaps", detail: `enemy had ${enemy_comp.ad} AD champions but you skipped Steelcaps` });
+  if (enemy_comp.assassins >= 2 && carry && !hasDefensive)
+    itemization_check.push({ issue: "no survivability vs burst", detail: `enemy had ${enemy_comp.assassins} assassins — you built no Zhonya/GA/QSS/Maw, so you can't expose yourself` });
+
+  // ── WIN CONDITION (your comp's playmakers + whether they were ahead) ─────────
+  const allyGold = allyMeta
+    .map((p) => ({ champion: p.champion, gold: Number(pf(lastIdx, p.participantId)?.totalGold ?? 0) }))
+    .sort((a, b) => b.gold - a.gold);
+  const win_condition = {
+    your_comp_tags: ally_comp.tags,
+    enemy_comp_tags: enemy_comp.tags,
+    playmakers: ally_comp.engage.map((champ) => {
+      const rank = allyGold.findIndex((x) => x.champion === champ) + 1;
+      return {
+        champion: champ,
+        gold_rank_in_team: `${rank}/5`,
+        state: rank <= 2 ? "ahead/healthy — play around their engage" : rank >= 4 ? "behind — don't rely on their engage" : "even",
+      };
+    }),
+  };
+
+  // ── FLAGS (pre-digested mistakes, each with its number) ──────────────────────
   const flags: Array<{ key: string; severity: "high" | "medium" | "low"; detail: string }> = [];
   const add = (key: string, severity: "high" | "medium" | "low", detail: string) => flags.push({ key, severity, detail });
   if (goldDiff14 != null && goldDiff14 < -800) add("lost_lane", goldDiff14 < -1800 ? "high" : "medium", `down ${-goldDiff14}g to ${oppo?.champion} by 14:00`);
@@ -398,6 +482,10 @@ export function analyzeGameTimeline(
   if ((economy.avg_idle_gold ?? 0) > 900) add("hoards_gold", "low", `averaged ${economy.avg_idle_gold}g unspent — recall + buy more often`);
   if ((macro.pct_time_far_from_team ?? 0) > 45 && !carry) add("often_split_from_team", "low", `${macro.pct_time_far_from_team}% of the game far (>4000u) from any ally`);
   if (objectives.your_presence_pct != null && objectives.your_presence_pct < 50) add("absent_for_objectives", "medium", `present for only ${objectives.your_presence_pct}% of your team's objectives`);
+  for (const ic of itemization_check)
+    add(ic.issue.includes("Mercury") ? "no_mercs_vs_cc" : ic.issue.includes("Steelcaps") ? "no_armor_vs_ad" : "no_survivability_vs_burst", "medium", ic.detail);
+  const dovedDeaths = deaths.filter((d) => d.under_turret === "enemy turret").length;
+  if (dovedDeaths >= 2) add("overdives", "medium", `${dovedDeaths} deaths under the ENEMY turret — overextending into dives`);
 
   return {
     available: true,
@@ -419,9 +507,12 @@ export function analyzeGameTimeline(
     damage,
     economy,
     macro,
+    comps: { ally: ally_comp, enemy: enemy_comp },
+    itemization_check,
+    win_condition,
     flags,
     hint:
-      "FULL-MATCH report from the Riot timeline — you are now aware of nearly everything that happened. `flags` is the pre-digested list of mistakes (each with the number). Lead your answer from the HIGHEST-severity flags, then back them with the raw sections (deaths[], death_summary, laning diffs, objectives, vision, damage, economy, macro). Be concrete and cite times/zones/numbers (e.g. 'died bot-side 5/11, 3 with no allies', 'down 1.4k to your laner by 14', '18% damage share', 'present for 33% of objectives'). Do NOT dump every field — pick the 2-4 most impactful problems for THIS game and give an actionable fix for each. If a value is null it wasn't available; don't invent.",
+      "FULL-MATCH report from the Riot timeline — you are aware of nearly everything. `flags` = pre-digested mistakes (each with its number), now including matchup-aware itemization (no_mercs_vs_cc / no_armor_vs_ad / no_survivability_vs_burst) and overdives (deaths under the enemy turret). `comps` categorizes BOTH teams (ap/ad counts, heavy_cc, engage champs, archetype tags); `win_condition` lists YOUR playmakers (engage champs) with their gold rank + state — use it to say e.g. 'you had Jarvan even, you should have played around his engage' (but do NOT advise that if his state is 'behind'). `deaths[].under_turret` marks tower dives. Lead from the highest-severity flags + the matchup context, then back them with the raw sections (deaths, laning, objectives, vision, damage, economy, macro). Be concrete and cite times/zones/numbers AND the matchup (e.g. 'vs 3 AP + Leona you went Berserker's — Mercs was the call', 'died bot-side 5/11, 3 alone', 'down 1.4k to your laner by 14', 'present for 33% of objectives'). Pick the 2-4 MOST impactful problems for THIS game and give an actionable fix for each; don't dump every field. If a value is null it wasn't available — don't invent.",
   };
 }
 

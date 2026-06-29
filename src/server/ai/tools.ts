@@ -738,6 +738,7 @@ async function myGame(ctx: UserContext) {
     return { error: "no_game_selected", message: "No game is attached. Tell the user to click a game in YOUR GAMES first, then pick an analysis." };
   }
   await warmItemData();
+  await warmChampClasses(); // comp categorization in the timeline analysis needs it
 
   // All 10 participants of the match — for the user's own stats AND the role/team
   // map the timeline analysis needs (lane opponent, allies for isolation).
