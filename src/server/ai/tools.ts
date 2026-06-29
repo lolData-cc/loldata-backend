@@ -723,6 +723,9 @@ async function getCachedTimeline(matchId: string, region: string): Promise<any |
   const hit = _tlCache.get(matchId);
   if (hit && Date.now() - hit.ts < 30 * 60 * 1000) return hit.tl;
   const tl = await getMatchTimeline(matchId, region);
+  // A 429 / 404 / error returns a body with NO frames — don't cache that, or it
+  // poisons the result for 30 min and blocks a retry. Only cache a real timeline.
+  if (!tl?.info?.frames?.length) return null;
   _tlCache.set(matchId, { ts: Date.now(), tl });
   return tl;
 }
@@ -774,24 +777,25 @@ async function myGame(ctx: UserContext) {
     .filter((id) => id > 0)
     .map((id) => itemName(id));
 
-  // Full-timeline analysis — best-effort: falls back to the aggregate stats if the
-  // timeline can't be fetched (too old / Riot error) or parsed.
-  let timeline: GameTimelineAnalysis = { available: false, reason: "not fetched" };
+  // Per-event timeline analysis (deaths/positions/lane diffs) is best-effort, but
+  // the box-derived MATCHUP (comps/itemization/win-condition) is always computed,
+  // so we run the analysis even when the Riot timeline doesn't load.
+  const partsMeta: PMeta[] = rows.map((x) => ({
+    participantId: Number(x.participant_id),
+    puuid: String(x.puuid),
+    teamId: Number(x.team_id),
+    role: String(x.role ?? ""),
+    champion: String(x.champion_name ?? ""),
+  }));
+  const myItems = [g.item0, g.item1, g.item2, g.item3, g.item4, g.item5].map(Number);
+  const goldByPid = new Map<number, number>(rows.map((x) => [Number(x.participant_id), Number(x.gold_earned ?? 0)]));
+  let raw: any = null;
   try {
-    const raw = await getCachedTimeline(ctx.matchId, ctx.region ?? "euw");
-    if (raw) {
-      const partsMeta: PMeta[] = rows.map((x) => ({
-        participantId: Number(x.participant_id),
-        puuid: String(x.puuid),
-        teamId: Number(x.team_id),
-        role: String(x.role ?? ""),
-        champion: String(x.champion_name ?? ""),
-      }));
-      timeline = analyzeGameTimeline(raw, partsMeta, ctx.puuid);
-    }
+    raw = await getCachedTimeline(ctx.matchId, ctx.region ?? "euw");
   } catch {
-    timeline = { available: false, reason: "timeline fetch failed" };
+    raw = null;
   }
+  const timeline: GameTimelineAnalysis = analyzeGameTimeline(raw, partsMeta, ctx.puuid, myItems, goldByPid);
 
   return {
     champion: g.champion_name,

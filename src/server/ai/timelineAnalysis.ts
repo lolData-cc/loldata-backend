@@ -72,9 +72,7 @@ export type PMeta = {
   champion: string;
 };
 
-export type GameTimelineAnalysis =
-  | { available: false; reason: string }
-  | ({ available: true } & Record<string, unknown>);
+export type GameTimelineAnalysis = { available: boolean } & Record<string, unknown>;
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
 const fmtT = (ms: number) => {
@@ -85,12 +83,87 @@ const fmtT = (ms: number) => {
 export function analyzeGameTimeline(
   timeline: any,
   parts: PMeta[],
-  myPuuid: string
+  myPuuid: string,
+  myItems: number[],
+  goldByPid: Map<number, number>
 ): GameTimelineAnalysis {
   const frames: any[] = timeline?.info?.frames ?? [];
-  if (!frames.length) return { available: false, reason: "no timeline frames" };
   const me = parts.find((p) => p.puuid === myPuuid);
   if (!me) return { available: false, reason: "participant not found in match" };
+
+  // ── MATCHUP (comps / itemization / win-condition) — derived from BOX data
+  // (the 10 champions, the player's final items, total gold), so it's ALWAYS
+  // available even when the Riot timeline didn't load. ─────────────────────────
+  const classifyComp = (meta: PMeta[]) => {
+    let ap = 0, ad = 0, hybrid = 0, assassins = 0, tanks = 0, marksmen = 0, mages = 0, fighters = 0, heavy_cc = 0;
+    const engage: string[] = [];
+    for (const p of meta) {
+      const dmg = damageOf(p.champion);
+      if (dmg === "AP") ap++; else if (dmg === "AD") ad++; else if (dmg === "Hybrid") hybrid++;
+      const cls = classesOf(p.champion);
+      if (cls.includes("Assassin")) assassins++;
+      if (cls.includes("Tank")) tanks++;
+      if (cls.includes("Marksman")) marksmen++;
+      if (cls.includes("Mage")) mages++;
+      if (cls.includes("Fighter")) fighters++;
+      const n = normChamp(p.champion);
+      if (HEAVY_CC.has(n)) heavy_cc++;
+      if (ENGAGE.has(n)) engage.push(p.champion);
+    }
+    const tags: string[] = [];
+    if (ap >= 3) tags.push("AP-heavy");
+    if (ad >= 4) tags.push("AD-heavy");
+    if (heavy_cc >= 3) tags.push("heavy CC");
+    if (engage.length >= 2) tags.push("strong engage");
+    if (assassins >= 2) tags.push("assassin/burst threat");
+    if (assassins + engage.length >= 3) tags.push("dive comp");
+    if (tanks >= 2 && marksmen >= 1) tags.push("front-to-back");
+    return { ap, ad, hybrid, assassins, tanks, marksmen, mages, fighters, heavy_cc, engage, tags };
+  };
+  const allyMeta = parts.filter((p) => p.teamId === me.teamId);
+  const enemyMeta = parts.filter((p) => p.teamId !== me.teamId);
+  const ally_comp = classifyComp(allyMeta);
+  const enemy_comp = classifyComp(enemyMeta);
+  const carry = ["TOP", "MIDDLE", "BOTTOM"].includes(me.role.toUpperCase());
+  const isADC = classesOf(me.champion).includes("Marksman");
+  const isJg = me.role.toUpperCase() === "JUNGLE";
+  const bought = new Set(myItems.filter((x) => x > 0));
+  const MERCS = 3111, STEELCAPS = 3047, QSS = [3140, 3139];
+  const DEFENSIVE = [3157, 3026, 3156, 3053, 3814, 6035, 3193, 3143, 3065, 3091];
+  const hasDefensive = DEFENSIVE.some((id) => bought.has(id)) || QSS.some((id) => bought.has(id));
+  const itemization_check: Array<{ issue: string; detail: string }> = [];
+  if ((enemy_comp.heavy_cc >= 2 || enemy_comp.ap >= 3) && !bought.has(MERCS) && !isADC && !isJg)
+    itemization_check.push({ issue: "no Mercury's Treads", detail: `enemy had ${enemy_comp.heavy_cc} hard-CC + ${enemy_comp.ap} AP but you didn't build Mercs` });
+  if (enemy_comp.ad >= 4 && !bought.has(STEELCAPS) && !isADC && !isJg)
+    itemization_check.push({ issue: "no Plated Steelcaps", detail: `enemy had ${enemy_comp.ad} AD champions but you skipped Steelcaps` });
+  if (enemy_comp.assassins >= 2 && carry && !hasDefensive)
+    itemization_check.push({ issue: "no survivability vs burst", detail: `enemy had ${enemy_comp.assassins} assassins — you built no Zhonya/GA/QSS/Maw, so you can't expose yourself` });
+  const allyGoldRank = allyMeta
+    .map((p) => ({ champion: p.champion, gold: goldByPid.get(p.participantId) ?? 0 }))
+    .sort((a, b) => b.gold - a.gold);
+  const win_condition = {
+    your_comp_tags: ally_comp.tags,
+    enemy_comp_tags: enemy_comp.tags,
+    playmakers: ally_comp.engage.map((champ) => {
+      const rank = allyGoldRank.findIndex((x) => x.champion === champ) + 1;
+      return {
+        champion: champ,
+        gold_rank_in_team: `${rank}/5`,
+        state: rank <= 2 ? "ahead/healthy — play around their engage" : rank >= 4 ? "behind — don't rely on their engage" : "even",
+      };
+    }),
+  };
+  const matchup = { comps: { ally: ally_comp, enemy: enemy_comp }, itemization_check, win_condition };
+
+  // No per-event timeline (Riot didn't return it / too old) → STILL hand back the
+  // box-derived matchup so the AI knows the comps + itemization even without the
+  // death positions / lane diffs.
+  if (!frames.length)
+    return {
+      available: false,
+      reason: "the precise timeline (death positions, lane diffs) wasn't available for this game — but the comps/itemization below ARE accurate",
+      ...matchup,
+    };
 
   const myPid = me.participantId;
   const myTeam = me.teamId;
@@ -397,72 +470,6 @@ export function analyzeGameTimeline(
     pct_time_off_lane_pre14: framesPre14 ? Math.round((roamFramesPre14 / framesPre14) * 100) : null,
   };
 
-  // ── COMPS (categorize both teams: AD/AP, CC, engage, archetype) ──────────────
-  const classifyComp = (meta: PMeta[]) => {
-    let ap = 0, ad = 0, hybrid = 0, assassins = 0, tanks = 0, marksmen = 0, mages = 0, fighters = 0, heavy_cc = 0;
-    const engage: string[] = [];
-    for (const p of meta) {
-      const dmg = damageOf(p.champion);
-      if (dmg === "AP") ap++; else if (dmg === "AD") ad++; else if (dmg === "Hybrid") hybrid++;
-      const cls = classesOf(p.champion);
-      if (cls.includes("Assassin")) assassins++;
-      if (cls.includes("Tank")) tanks++;
-      if (cls.includes("Marksman")) marksmen++;
-      if (cls.includes("Mage")) mages++;
-      if (cls.includes("Fighter")) fighters++;
-      const n = normChamp(p.champion);
-      if (HEAVY_CC.has(n)) heavy_cc++;
-      if (ENGAGE.has(n)) engage.push(p.champion);
-    }
-    const tags: string[] = [];
-    if (ap >= 3) tags.push("AP-heavy");
-    if (ad >= 4) tags.push("AD-heavy");
-    if (heavy_cc >= 3) tags.push("heavy CC");
-    if (engage.length >= 2) tags.push("strong engage");
-    if (assassins >= 2) tags.push("assassin/burst threat");
-    if (assassins + engage.length >= 3) tags.push("dive comp");
-    if (tanks >= 2 && marksmen >= 1) tags.push("front-to-back");
-    return { ap, ad, hybrid, assassins, tanks, marksmen, mages, fighters, heavy_cc, engage, tags };
-  };
-  const allyMeta = parts.filter((p) => p.teamId === myTeam);
-  const enemyMeta = parts.filter((p) => p.teamId !== myTeam);
-  const ally_comp = classifyComp(allyMeta);
-  const enemy_comp = classifyComp(enemyMeta);
-  const carry = ["TOP", "MIDDLE", "BOTTOM"].includes(me.role.toUpperCase());
-
-  // ── ITEMIZATION vs the enemy comp (the situational-item check) ───────────────
-  const bought = new Set(itemBuys.map((b) => b.id));
-  const myClasses = classesOf(me.champion);
-  const isADC = myClasses.includes("Marksman");
-  const isJg = me.role.toUpperCase() === "JUNGLE";
-  const MERCS = 3111, STEELCAPS = 3047, QSS = [3140, 3139];
-  const DEFENSIVE = [3157, 3026, 3156, 3053, 3814, 6035, 3193, 3143, 3065, 3091];
-  const hasDefensive = DEFENSIVE.some((id) => bought.has(id)) || QSS.some((id) => bought.has(id));
-  const itemization_check: Array<{ issue: string; detail: string }> = [];
-  if ((enemy_comp.heavy_cc >= 2 || enemy_comp.ap >= 3) && !bought.has(MERCS) && !isADC && !isJg)
-    itemization_check.push({ issue: "no Mercury's Treads", detail: `enemy had ${enemy_comp.heavy_cc} hard-CC + ${enemy_comp.ap} AP but you didn't build Mercs` });
-  if (enemy_comp.ad >= 4 && !bought.has(STEELCAPS) && !isADC && !isJg)
-    itemization_check.push({ issue: "no Plated Steelcaps", detail: `enemy had ${enemy_comp.ad} AD champions but you skipped Steelcaps` });
-  if (enemy_comp.assassins >= 2 && carry && !hasDefensive)
-    itemization_check.push({ issue: "no survivability vs burst", detail: `enemy had ${enemy_comp.assassins} assassins — you built no Zhonya/GA/QSS/Maw, so you can't expose yourself` });
-
-  // ── WIN CONDITION (your comp's playmakers + whether they were ahead) ─────────
-  const allyGold = allyMeta
-    .map((p) => ({ champion: p.champion, gold: Number(pf(lastIdx, p.participantId)?.totalGold ?? 0) }))
-    .sort((a, b) => b.gold - a.gold);
-  const win_condition = {
-    your_comp_tags: ally_comp.tags,
-    enemy_comp_tags: enemy_comp.tags,
-    playmakers: ally_comp.engage.map((champ) => {
-      const rank = allyGold.findIndex((x) => x.champion === champ) + 1;
-      return {
-        champion: champ,
-        gold_rank_in_team: `${rank}/5`,
-        state: rank <= 2 ? "ahead/healthy — play around their engage" : rank >= 4 ? "behind — don't rely on their engage" : "even",
-      };
-    }),
-  };
-
   // ── FLAGS (pre-digested mistakes, each with its number) ──────────────────────
   const flags: Array<{ key: string; severity: "high" | "medium" | "low"; detail: string }> = [];
   const add = (key: string, severity: "high" | "medium" | "low", detail: string) => flags.push({ key, severity, detail });
@@ -507,12 +514,10 @@ export function analyzeGameTimeline(
     damage,
     economy,
     macro,
-    comps: { ally: ally_comp, enemy: enemy_comp },
-    itemization_check,
-    win_condition,
+    ...matchup,
     flags,
     hint:
-      "FULL-MATCH report from the Riot timeline — you are aware of nearly everything. `flags` = pre-digested mistakes (each with its number), now including matchup-aware itemization (no_mercs_vs_cc / no_armor_vs_ad / no_survivability_vs_burst) and overdives (deaths under the enemy turret). `comps` categorizes BOTH teams (ap/ad counts, heavy_cc, engage champs, archetype tags); `win_condition` lists YOUR playmakers (engage champs) with their gold rank + state — use it to say e.g. 'you had Jarvan even, you should have played around his engage' (but do NOT advise that if his state is 'behind'). `deaths[].under_turret` marks tower dives. Lead from the highest-severity flags + the matchup context, then back them with the raw sections (deaths, laning, objectives, vision, damage, economy, macro). Be concrete and cite times/zones/numbers AND the matchup (e.g. 'vs 3 AP + Leona you went Berserker's — Mercs was the call', 'died bot-side 5/11, 3 alone', 'down 1.4k to your laner by 14', 'present for 33% of objectives'). Pick the 2-4 MOST impactful problems for THIS game and give an actionable fix for each; don't dump every field. If a value is null it wasn't available — don't invent.",
+      "FULL-MATCH report — you are aware of nearly everything. `comps` (BOTH teams: ap/ad counts, heavy_cc, engage champs, archetype tags), `itemization_check` (situational-item misses vs the enemy comp) and `win_condition` (your engage playmakers + their gold rank/state) come from the box and are ALWAYS present — even if `available` is false (in that case the per-event timeline — death positions, lane diffs — just wasn't captured for this game; SAY that, don't invent it). When available, also use `deaths[]` (zone, alone, under_turret = tower dive), `death_summary`, `laning` (diffs at 5/10/14, plates, level-6 race), `objectives`, `vision`, `damage`, `economy`, `macro`, and `flags` (pre-digested mistakes with numbers). Lead from the highest-severity flags + the matchup, cite concrete numbers AND the matchup (e.g. 'vs 3 AP + Leona you went Berserker's — Mercs was the call', 'died bot-side 5/11, 3 alone', 'down 1.4k by 14'), and use win_condition to say which ally to play around (only if their state isn't 'behind'). Pick the 2-4 MOST impactful problems; don't dump every field or invent missing data.",
   };
 }
 
