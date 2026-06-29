@@ -1,8 +1,11 @@
 // src/server/routes/contact.ts
 //
-// POST /api/contact — public contact form sink. Forwards the message straight to
-// the admin Telegram feed (the message itself is the record, so no inbox infra
-// is required). Light per-IP rate limit since it's unauthenticated.
+// POST /api/contact — public contact form sink. Two outputs:
+//   1) an EMAIL to the loldata inbox via Resend (so messages land in Gmail), and
+//   2) a ping to the admin Telegram feed.
+// Both are best-effort and degrade independently (if RESEND_API_KEY is unset the
+// email is skipped but Telegram still fires; if neither is set the endpoint still
+// returns ok). Light per-IP rate limit since it's unauthenticated.
 
 import { notifyAdmin, esc } from "../services/telegram";
 
@@ -19,6 +22,43 @@ function rateLimited(ip: string): boolean {
   }
   e.count++;
   return e.count > RL_MAX;
+}
+
+// Where contact mail lands, and who it's "from". With Resend's onboarding sender
+// you can mail your OWN account address with no domain setup; once loldata.cc is
+// verified in Resend, set CONTACT_FROM=contact@loldata.cc.
+const CONTACT_TO = process.env.CONTACT_TO || "loldata.cc1@gmail.com";
+const CONTACT_FROM = process.env.CONTACT_FROM || "loldata contact <onboarding@resend.dev>";
+
+async function sendContactEmail(opts: {
+  subject: string;
+  text: string;
+  replyTo?: string;
+}): Promise<void> {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) return; // email not configured → skip (Telegram still fires)
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: CONTACT_FROM,
+        to: [CONTACT_TO],
+        subject: opts.subject,
+        text: opts.text,
+        ...(opts.replyTo ? { reply_to: opts.replyTo } : {}),
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`[contact] resend ${res.status}: ${body.slice(0, 300)}`);
+    }
+  } catch (e) {
+    console.error("[contact] email failed:", e instanceof Error ? e.message : e);
+  }
 }
 
 export async function contactHandler(req: Request): Promise<Response> {
@@ -41,8 +81,16 @@ export async function contactHandler(req: Request): Promise<Response> {
 
   if (!message) return Response.json({ error: "Message is required" }, { status: 400 });
 
+  const subj = subject || "Contact from loldata.cc";
+  const text = `${message}\n\n— from: ${email || "(no email provided)"}`;
+
+  // 1) email to the inbox (if Resend is configured)
+  void sendContactEmail({ subject: subj, text, replyTo: email || undefined });
+
+  // 2) admin Telegram feed
   void notifyAdmin(
-    `✉️ <b>New contact message</b>\n${subject ? `<b>${esc(subject)}</b>\n` : ""}${esc(message)}\n\n— ${esc(email || "(no email provided)")}`,
+    `✉️ <b>New contact message</b>\n<b>${esc(subj)}</b>\n${esc(message)}\n\n— ${esc(email || "(no email provided)")}`,
   );
+
   return Response.json({ ok: true });
 }
