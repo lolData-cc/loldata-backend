@@ -52,7 +52,7 @@ WHAT YOU CAN DO — READ-ONLY
 
 HOW YOU WORK
 - Pick the tool(s) that answer the question, call them, then write the answer from what they return. You may call several.
-- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_runes = best keystones + rune trees for a champion (use for any keystone/rune question). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves). my_best_game = the signed-in user's best recent ranked game (only when they ask for their best/standout recent game). patch_changes = champion/item buffs & nerfs in a recent patch (use for "was X buffed/nerfed", "what changed in patch Y", "is X stronger now").
+- best_items = build/item advice (optionally vs an enemy category like assassins, or a specific enemy champion). best_runes = best keystones + rune trees for a champion (use for any keystone/rune question). best_teammates = duos. matchups = head-to-head / favourable matchups. champion_overview = general strength. champion_top_players = strong players on a champion. my_performance = the signed-in user's own recent form (only when they ask about themselves). my_recent_games = the user's last ~15 ranked games in detail (per-game laning @10, KP, damage share — for "analyze my recent games / laning / teamfighting"). my_game = ONE specific game the user has attached/selected (use for "this game" / the attached match — its laning, itemization or teamfight). my_best_game = the signed-in user's best recent ranked game (only when they ask for their best/standout recent game). patch_changes = champion/item buffs & nerfs in a recent patch (use for "was X buffed/nerfed", "what changed in patch Y", "is X stronger now").
 
 VISUALS — some tools render a widget to the user automatically (you do NOT draw it in text):
 - best_runes shows the champion's full RUNE PAGE as a visual rune tree. So explain WHY (keystone choice, key runes, trade-offs) in prose — do not list every rune/shard or draw ASCII.
@@ -183,6 +183,7 @@ export async function aiChatHandler(req: Request): Promise<Response> {
     puuid: typeof uc?.puuid === "string" ? uc.puuid : null,
     region: typeof uc?.region === "string" ? uc.region : null,
     nametag: typeof uc?.nametag === "string" ? uc.nametag : null,
+    matchId: typeof uc?.matchId === "string" ? uc.matchId : null,
   };
 
   const userId = await userIdFromReq(req);

@@ -22,7 +22,7 @@ import { fetchChampionOtps } from "../routes/getChampionOtpRanking";
 import { getMatchDetails } from "../riot";
 import { latestPatch as latestPatchVersion } from "../services/patchDiff";
 
-export type UserContext = { puuid?: string | null; region?: string | null; nametag?: string | null };
+export type UserContext = { puuid?: string | null; region?: string | null; nametag?: string | null; matchId?: string | null };
 
 const ROLES = new Set(["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]);
 const QUEUES = [420, 440]; // Ranked Solo/Duo + Flex
@@ -220,6 +220,12 @@ export const TOOLS: Anthropic.Tool[] = [
     input_schema: { type: "object", properties: {}, required: [] },
   },
   {
+    name: "my_game",
+    description:
+      "Detailed stats for ONE specific ranked game the user has SELECTED/attached in the UI — their KDA, CS and CS/min, kill participation %, damage share %, vision, gold, the items they built, and a 10-minute laning snapshot (CS@10, gold@10, K/D/A@10) when available. Use this whenever the user asks about 'this game', 'the selected match', the attached game, or their laning / itemization / teamfight in that ONE match. Identity and which match come from the session; takes no arguments. Errors if no game is attached.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  {
     name: "patch_changes",
     description:
       "What changed in a recent PATCH — champion and item buffs/nerfs computed from the official game-data diff. Use this for ANY question about patch changes: 'was X buffed/nerfed', 'cosa è cambiato a X', 'what changed in patch 16.13', 'is X stronger this patch', 'recent changes to <item>'. Args (all optional): `champion` (that champion's changes across recent patches), `item` (an item's changes), `patch` (e.g. '16.13' → that patch's changelog); no args = the latest patch summary. Ground your answer ONLY in what it returns. The full visual changelog is on the /patch-notes page.",
@@ -265,6 +271,8 @@ export function makeExecutor(
           return myPerformance(ctx);
         case "my_recent_games":
           return myRecentGames(ctx);
+        case "my_game":
+          return myGame(ctx);
         case "my_best_game":
           return myBestGame(ctx, input);
         case "patch_changes":
@@ -701,6 +709,73 @@ async function myRecentGames(ctx: UserContext) {
       most_built_items,
       recent_games: games,
       hint: "Real per-game data — answer concretely, do NOT claim you lack the detail. Use kp_pct + damage_share_pct for teamfight impact; at_10 (cs/gold/kda at 10 min) for LANING (only on the cs_at_10_sample subset of games); and the wins-vs-losses split to find what breaks down in losses. most_built_items = their actual itemization. Cite the numbers and give 1-2 concrete fixes.",
+    };
+  } finally {
+    client.release();
+  }
+}
+
+// ── ONE specific game the user attached/selected (per-game deep dive) ────────
+// Same participants columns as my_recent_games but for a single match_id (the
+// game the user clicked in YOUR GAMES). matchId comes from the request context.
+async function myGame(ctx: UserContext) {
+  if (!ctx?.puuid) {
+    return { error: "not_linked", message: "The user is not signed in or has not linked a Riot account." };
+  }
+  if (!ctx?.matchId) {
+    return { error: "no_game_selected", message: "No game is attached. Tell the user to click a game in YOUR GAMES first, then pick an analysis." };
+  }
+  await warmItemData();
+  const client = await explorerPool().connect();
+  try {
+    await client.query("SET statement_timeout = 12000");
+    const r = await client.query(
+      `SELECT p.champion_name, p.role, p.win, p.kills, p.deaths, p.assists,
+              p.total_cs, p.time_played, p.vision_score, p.solo_kills, p.gold_earned,
+              p.total_damage_to_champions, p.kill_participation, p.damage_share,
+              p.cs_at_10, p.gold_at_10, p.kills_at_10, p.deaths_at_10, p.assists_at_10, p.damage_at_10,
+              p.item0, p.item1, p.item2, p.item3, p.item4, p.item5
+         FROM participants p JOIN matches m ON m.match_id = p.match_id
+        WHERE p.puuid = $1 AND p.match_id = $2
+        LIMIT 1`,
+      [ctx.puuid, ctx.matchId]
+    );
+    const g = (r.rows as any[])[0];
+    if (!g) {
+      return { error: "game_not_found", message: "That game isn't in our database yet (it may be too recent). Suggest trying another game." };
+    }
+    const mins = Number(g.time_played) / 60;
+    const pct = (x: any): number | null => (x == null ? null : Math.round(Number(x) * 100));
+    const items_built = [g.item0, g.item1, g.item2, g.item3, g.item4, g.item5]
+      .map(Number)
+      .filter((id) => id > 0)
+      .map((id) => itemName(id));
+    return {
+      champion: g.champion_name,
+      role: g.role,
+      win: !!g.win,
+      kda: `${g.kills}/${g.deaths}/${g.assists}`,
+      cs: Number(g.total_cs),
+      cs_per_min: mins > 0 ? Number((Number(g.total_cs) / mins).toFixed(1)) : null,
+      duration_min: Math.round(mins),
+      kp_pct: pct(g.kill_participation),
+      damage_share_pct: pct(g.damage_share),
+      damage_to_champions: Number(g.total_damage_to_champions),
+      vision: Number(g.vision_score),
+      solo_kills: Number(g.solo_kills),
+      gold: Number(g.gold_earned),
+      // 10-min laning snapshot — null when no timeline was captured for this game.
+      at_10:
+        g.cs_at_10 == null
+          ? null
+          : {
+              cs: Number(g.cs_at_10),
+              gold: Number(g.gold_at_10),
+              kda: `${g.kills_at_10 ?? 0}/${g.deaths_at_10 ?? 0}/${g.assists_at_10 ?? 0}`,
+              damage: g.damage_at_10 == null ? null : Number(g.damage_at_10),
+            },
+      items_built,
+      hint: "This is the ONE game the user attached — analyze THIS game specifically and concretely. at_10 = the 10-minute laning snapshot (null if not captured for this game); kp_pct/damage_share_pct = teamfight impact; items_built = what they actually bought. Give 1-2 specific, actionable takeaways for this game; don't be generic.",
     };
   } finally {
     client.release();
