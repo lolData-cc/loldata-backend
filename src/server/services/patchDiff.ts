@@ -445,6 +445,26 @@ export async function latestPatchMap(): Promise<{ patch: string | null; champion
   return { patch, champions: agg("champion"), items: agg("item") };
 }
 
+// Detailed per-entity change list for the LATEST patch — powers the hover
+// tooltip on each buff/nerf badge. Champions are keyed by a normalized id
+// (lowercase, alnum-only) to match the frontend's lookup; items by their id.
+const _normChamp = (s: string | number) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+type ChangeDetail = { label: string; old: string | null; new: string | null; direction: string };
+export async function latestPatchChanges(): Promise<{ patch: string | null; champions: Record<string, ChangeDetail[]>; items: Record<string, ChangeDetail[]> }> {
+  const patches = await listPatches();
+  const patch = patches[0] ?? null;
+  if (!patch) return { patch: null, champions: {}, items: {} };
+  const rows = await patchChangesFor({ patch, limit: 5000 });
+  const champions: Record<string, ChangeDetail[]> = {};
+  const items: Record<string, ChangeDetail[]> = {};
+  for (const r of rows) {
+    const d: ChangeDetail = { label: r.label, old: r.old_value, new: r.new_value, direction: r.direction };
+    if (r.kind === "champion") (champions[_normChamp(r.entity_key)] ??= []).push(d);
+    else if (r.kind === "item") (items[String(r.entity_key)] ??= []).push(d);
+  }
+  return { patch, champions, items };
+}
+
 export async function proseFor(patch: string): Promise<Record<string, string>> {
   await ensure();
   const c = await explorerPool().connect();
