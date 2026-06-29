@@ -205,7 +205,14 @@ export async function aiChatHandler(req: Request): Promise<Response> {
 
   try {
     const toolLog: ToolLogEntry[] = [];
-    const answer = await runAgent(SYSTEM, messages, TOOLS, makeExecutor(ctx, toolLog));
+    // When a SPECIFIC game is attached, PIN the model to it: force a fresh my_game
+    // call and forbid reusing a previously-attached game's analysis from history.
+    // Otherwise an identical follow-up question ("coach this game") re-answers the
+    // OLD game still sitting in the chat history.
+    const sys = ctx.matchId
+      ? `${SYSTEM}\n\nATTACHED GAME (this message): the user attached ONE specific game to analyze (internal id ${ctx.matchId}). It MAY be a DIFFERENT game from one discussed earlier in this conversation. Before answering you MUST call my_game now and base your ENTIRE answer ONLY on the champion, comps, timeline and numbers it returns for THIS game. Do NOT reuse, continue or copy the analysis of any previously-attached game — if the champion or stats differ from earlier in the chat, the attached game is the new and ONLY one that matters right now.`
+      : SYSTEM;
+    const answer = await runAgent(sys, messages, TOOLS, makeExecutor(ctx, toolLog));
     const actions = await deriveActions(toolLog, ctx);
     // Rich inline widgets (rune page, best-game match card) derived from the
     // real tool outputs — the frontend renders these between text and actions.
