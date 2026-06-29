@@ -213,6 +213,16 @@ export async function aiChatHandler(req: Request): Promise<Response> {
       ? `${SYSTEM}\n\nATTACHED GAME (this message): the user attached ONE specific game to analyze (internal id ${ctx.matchId}). It MAY be a DIFFERENT game from one discussed earlier in this conversation. Before answering you MUST call my_game now and base your ENTIRE answer ONLY on the champion, comps, timeline and numbers it returns for THIS game. Do NOT reuse, continue or copy the analysis of any previously-attached game — if the champion or stats differ from earlier in the chat, the attached game is the new and ONLY one that matters right now.`
       : SYSTEM;
     const answer = await runAgent(sys, messages, TOOLS, makeExecutor(ctx, toolLog));
+    // Observability for the attached-game flow: confirms the matchId actually
+    // arrived and that my_game was (re)called for THIS turn — so we can tell a
+    // "wrong game" report apart from a frontend that never sent the matchId.
+    const toolsUsed = toolLog.map((t) => t.name).join(",") || "none";
+    if (ctx.matchId) {
+      console.log(
+        `[ai/chat] attached matchId=${ctx.matchId} | msgs=${messages.length} | tools=[${toolsUsed}]` +
+          (toolLog.some((t) => t.name === "my_game") ? "" : " ⚠ my_game NOT called"),
+      );
+    }
     const actions = await deriveActions(toolLog, ctx);
     // Rich inline widgets (rune page, best-game match card) derived from the
     // real tool outputs — the frontend renders these between text and actions.
