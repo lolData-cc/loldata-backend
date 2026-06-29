@@ -214,6 +214,12 @@ export const TOOLS: Anthropic.Tool[] = [
     input_schema: { type: "object", properties: {}, required: [] },
   },
   {
+    name: "my_recent_games",
+    description:
+      "The signed-in user's OWN recent ranked games in DETAIL — per game: KDA, CS and CS/min, kill participation %, damage share %, vision, and a 10-minute LANING snapshot (CS@10, gold@10, K/D/A@10) when available; plus overall/win/loss averages and their most-built items. Use this for ANY specific question about the user's OWN play: laning phase, teamfighting/impact (KP, damage share), CS, itemization, or 'what should I fix'. Identity comes from the session; takes no arguments. (Use `my_performance` only for a quick recent-vs-season trend.)",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  {
     name: "patch_changes",
     description:
       "What changed in a recent PATCH — champion and item buffs/nerfs computed from the official game-data diff. Use this for ANY question about patch changes: 'was X buffed/nerfed', 'cosa è cambiato a X', 'what changed in patch 16.13', 'is X stronger this patch', 'recent changes to <item>'. Args (all optional): `champion` (that champion's changes across recent patches), `item` (an item's changes), `patch` (e.g. '16.13' → that patch's changelog); no args = the latest patch summary. Ground your answer ONLY in what it returns. The full visual changelog is on the /patch-notes page.",
@@ -257,6 +263,8 @@ export function makeExecutor(
           return championTopPlayers(input);
         case "my_performance":
           return myPerformance(ctx);
+        case "my_recent_games":
+          return myRecentGames(ctx);
         case "my_best_game":
           return myBestGame(ctx, input);
         case "patch_changes":
@@ -595,6 +603,104 @@ async function myPerformance(ctx: UserContext) {
         avg_cs: Number(s.cs ?? 0),
       },
       hint: "Compare 'recent' to 'season' and tell the user whether they are trending up or down on winrate, KDA and CS. 'season' includes the recent games, so treat it as their typical baseline.",
+    };
+  } finally {
+    client.release();
+  }
+}
+
+// ── The user's own recent games, in detail (per-game laning + impact) ────────
+// Backs the Learn "AI Coach" buttons. participants already stores the @10 laning
+// snapshot (cs_at_10/gold_at_10/…), kill_participation and damage_share (both
+// 0..1 fractions), so the model can answer concrete laning / teamfight / CS /
+// itemization questions about the user — no timelines needed.
+async function myRecentGames(ctx: UserContext) {
+  if (!ctx?.puuid) {
+    return { error: "not_linked", message: "The user is not signed in or has not linked a Riot account. Tell them to sign in and link their account to use this." };
+  }
+  await warmItemData();
+  const client = await explorerPool().connect();
+  try {
+    await client.query("SET statement_timeout = 12000");
+    const r = await client.query(
+      `SELECT p.champion_name, p.role, p.win, p.kills, p.deaths, p.assists,
+              p.total_cs, p.time_played, p.vision_score,
+              p.kill_participation, p.damage_share,
+              p.cs_at_10, p.gold_at_10, p.kills_at_10, p.deaths_at_10, p.assists_at_10,
+              p.legendary_order
+         FROM participants p JOIN matches m ON m.match_id = p.match_id
+        WHERE p.puuid = $1 AND m.queue_id = ANY($2)
+        ORDER BY m.game_creation DESC
+        LIMIT 15`,
+      [ctx.puuid, QUEUES]
+    );
+    const rows = r.rows as any[];
+    if (!rows.length) {
+      return { name: ctx.nametag ?? "you", note: "No ranked games found in our database for this account yet — play a ranked game and refresh the profile page." };
+    }
+
+    const pct = (x: any): number | null => (x == null ? null : Math.round(Number(x) * 100));
+    const games = rows.map((g) => {
+      const mins = Number(g.time_played) / 60;
+      return {
+        champion: g.champion_name as string,
+        role: g.role as string,
+        win: !!g.win,
+        kda: `${g.kills}/${g.deaths}/${g.assists}`,
+        cs: Number(g.total_cs),
+        cs_per_min: mins > 0 ? Number((Number(g.total_cs) / mins).toFixed(1)) : null,
+        kp_pct: pct(g.kill_participation),
+        damage_share_pct: pct(g.damage_share),
+        vision: Number(g.vision_score),
+        // 10-minute laning snapshot — only on the subset of games we captured a
+        // timeline for (cs_at_10 null otherwise).
+        at_10:
+          g.cs_at_10 == null
+            ? null
+            : { cs: Number(g.cs_at_10), gold: Number(g.gold_at_10), kda: `${g.kills_at_10 ?? 0}/${g.deaths_at_10 ?? 0}/${g.assists_at_10 ?? 0}` },
+      };
+    });
+
+    const mean = (xs: (number | null)[]): number | null => {
+      const v = xs.filter((x): x is number => x != null);
+      return v.length ? Number((v.reduce((s, x) => s + x, 0) / v.length).toFixed(1)) : null;
+    };
+    const agg = (gs: typeof games) => {
+      if (!gs.length) return null;
+      const at10 = gs.map((x) => x.at_10).filter((x): x is { cs: number; gold: number; kda: string } => x != null);
+      return {
+        games: gs.length,
+        winrate: `${Math.round((gs.filter((x) => x.win).length / gs.length) * 100)}%`,
+        avg_cs: mean(gs.map((x) => x.cs)),
+        avg_cs_per_min: mean(gs.map((x) => x.cs_per_min)),
+        avg_kp_pct: mean(gs.map((x) => x.kp_pct)),
+        avg_damage_share_pct: mean(gs.map((x) => x.damage_share_pct)),
+        avg_vision: mean(gs.map((x) => x.vision)),
+        avg_cs_at_10: at10.length ? mean(at10.map((x) => x.cs)) : null,
+        cs_at_10_sample: at10.length,
+      };
+    };
+
+    // Their actual itemization tendency: most-built legendaries across these games.
+    const itemCount = new Map<number, number>();
+    for (const g of rows) {
+      const leg = (g.legendary_order as number[] | null) ?? [];
+      for (const id of leg) if (id) itemCount.set(Number(id), (itemCount.get(Number(id)) ?? 0) + 1);
+    }
+    const most_built_items = [...itemCount.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([id, n]) => ({ item: itemName(id), games: n }));
+
+    return {
+      name: ctx.nametag ?? "you",
+      games_analysed: games.length,
+      overall: agg(games),
+      wins: agg(games.filter((x) => x.win)),
+      losses: agg(games.filter((x) => !x.win)),
+      most_built_items,
+      recent_games: games,
+      hint: "Real per-game data — answer concretely, do NOT claim you lack the detail. Use kp_pct + damage_share_pct for teamfight impact; at_10 (cs/gold/kda at 10 min) for LANING (only on the cs_at_10_sample subset of games); and the wins-vs-losses split to find what breaks down in losses. most_built_items = their actual itemization. Cite the numbers and give 1-2 concrete fixes.",
     };
   } finally {
     client.release();
