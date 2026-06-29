@@ -19,8 +19,9 @@ import {
 } from "../explorer/champClass";
 import { warmItemData, itemName, buildItemPool } from "./itemData";
 import { fetchChampionOtps } from "../routes/getChampionOtpRanking";
-import { getMatchDetails } from "../riot";
+import { getMatchDetails, getMatchTimeline } from "../riot";
 import { latestPatch as latestPatchVersion } from "../services/patchDiff";
+import { analyzeGameTimeline, type PMeta, type GameTimelineAnalysis } from "./timelineAnalysis";
 
 export type UserContext = { puuid?: string | null; region?: string | null; nametag?: string | null; matchId?: string | null };
 
@@ -222,7 +223,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "my_game",
     description:
-      "Detailed stats for ONE specific ranked game the user has SELECTED/attached in the UI — their KDA, CS and CS/min, kill participation %, damage share %, vision, gold, the items they built, and a 10-minute laning snapshot (CS@10, gold@10, K/D/A@10) when available. Use this whenever the user asks about 'this game', 'the selected match', the attached game, or their laning / itemization / teamfight in that ONE match. Identity and which match come from the session; takes no arguments. Errors if no game is attached.",
+      "DEEP analysis of ONE specific ranked game the user SELECTED/attached in the UI. Returns their stats (KDA, CS/min, KP%, damage share, vision, gold, items) AND a position-aware TIMELINE breakdown of the whole match: every death (where on the map, whether they were ALONE, in-lane vs roaming), deaths far from a contested objective (dragon/baron/herald), lane gold/CS/XP diffs vs their direct opponent at 10 and 14 minutes, and timeline kill participation. THE go-to tool for any question about 'this game' / the attached match — laning, deaths & positioning, teamfighting, itemization, or 'what did I do wrong'. Identity and which match come from the session; takes no arguments. Errors if no game is attached.",
     input_schema: { type: "object", properties: {}, required: [] },
   },
   {
@@ -715,9 +716,20 @@ async function myRecentGames(ctx: UserContext) {
   }
 }
 
-// ── ONE specific game the user attached/selected (per-game deep dive) ────────
-// Same participants columns as my_recent_games but for a single match_id (the
-// game the user clicked in YOUR GAMES). matchId comes from the request context.
+// Per-match timeline cache (raw Riot timeline) — a user clicking several AI Coach
+// buttons on the same game hits Riot once. 30-min TTL.
+const _tlCache = new Map<string, { ts: number; tl: any }>();
+async function getCachedTimeline(matchId: string, region: string): Promise<any | null> {
+  const hit = _tlCache.get(matchId);
+  if (hit && Date.now() - hit.ts < 30 * 60 * 1000) return hit.tl;
+  const tl = await getMatchTimeline(matchId, region);
+  _tlCache.set(matchId, { ts: Date.now(), tl });
+  return tl;
+}
+
+// ── ONE specific game the user attached/selected (deep, timeline-aware) ──────
+// The user's box stats for this match_id PLUS a position-aware analysis of the
+// FULL Riot timeline (deaths/zones/isolation, deaths vs objectives, lane diffs).
 async function myGame(ctx: UserContext) {
   if (!ctx?.puuid) {
     return { error: "not_linked", message: "The user is not signed in or has not linked a Riot account." };
@@ -726,60 +738,86 @@ async function myGame(ctx: UserContext) {
     return { error: "no_game_selected", message: "No game is attached. Tell the user to click a game in YOUR GAMES first, then pick an analysis." };
   }
   await warmItemData();
+
+  // All 10 participants of the match — for the user's own stats AND the role/team
+  // map the timeline analysis needs (lane opponent, allies for isolation).
   const client = await explorerPool().connect();
+  let rows: any[];
   try {
     await client.query("SET statement_timeout = 12000");
     const r = await client.query(
-      `SELECT p.champion_name, p.role, p.win, p.kills, p.deaths, p.assists,
+      `SELECT p.participant_id, p.puuid, p.team_id, p.role, p.champion_name,
+              p.win, p.kills, p.deaths, p.assists,
               p.total_cs, p.time_played, p.vision_score, p.solo_kills, p.gold_earned,
               p.total_damage_to_champions, p.kill_participation, p.damage_share,
               p.cs_at_10, p.gold_at_10, p.kills_at_10, p.deaths_at_10, p.assists_at_10, p.damage_at_10,
               p.item0, p.item1, p.item2, p.item3, p.item4, p.item5
-         FROM participants p JOIN matches m ON m.match_id = p.match_id
-        WHERE p.puuid = $1 AND p.match_id = $2
-        LIMIT 1`,
-      [ctx.puuid, ctx.matchId]
+         FROM participants p
+        WHERE p.match_id = $1`,
+      [ctx.matchId]
     );
-    const g = (r.rows as any[])[0];
-    if (!g) {
-      return { error: "game_not_found", message: "That game isn't in our database yet (it may be too recent). Suggest trying another game." };
-    }
-    const mins = Number(g.time_played) / 60;
-    const pct = (x: any): number | null => (x == null ? null : Math.round(Number(x) * 100));
-    const items_built = [g.item0, g.item1, g.item2, g.item3, g.item4, g.item5]
-      .map(Number)
-      .filter((id) => id > 0)
-      .map((id) => itemName(id));
-    return {
-      champion: g.champion_name,
-      role: g.role,
-      win: !!g.win,
-      kda: `${g.kills}/${g.deaths}/${g.assists}`,
-      cs: Number(g.total_cs),
-      cs_per_min: mins > 0 ? Number((Number(g.total_cs) / mins).toFixed(1)) : null,
-      duration_min: Math.round(mins),
-      kp_pct: pct(g.kill_participation),
-      damage_share_pct: pct(g.damage_share),
-      damage_to_champions: Number(g.total_damage_to_champions),
-      vision: Number(g.vision_score),
-      solo_kills: Number(g.solo_kills),
-      gold: Number(g.gold_earned),
-      // 10-min laning snapshot — null when no timeline was captured for this game.
-      at_10:
-        g.cs_at_10 == null
-          ? null
-          : {
-              cs: Number(g.cs_at_10),
-              gold: Number(g.gold_at_10),
-              kda: `${g.kills_at_10 ?? 0}/${g.deaths_at_10 ?? 0}/${g.assists_at_10 ?? 0}`,
-              damage: g.damage_at_10 == null ? null : Number(g.damage_at_10),
-            },
-      items_built,
-      hint: "This is the ONE game the user attached — analyze THIS game specifically and concretely. at_10 = the 10-minute laning snapshot (null if not captured for this game); kp_pct/damage_share_pct = teamfight impact; items_built = what they actually bought. Give 1-2 specific, actionable takeaways for this game; don't be generic.",
-    };
+    rows = r.rows as any[];
   } finally {
     client.release();
   }
+
+  const g = rows.find((x) => x.puuid === ctx.puuid);
+  if (!g) {
+    return { error: "game_not_found", message: "That game isn't in our database yet (it may be too recent). Suggest trying another game." };
+  }
+
+  const mins = Number(g.time_played) / 60;
+  const pct = (x: any): number | null => (x == null ? null : Math.round(Number(x) * 100));
+  const items_built = [g.item0, g.item1, g.item2, g.item3, g.item4, g.item5]
+    .map(Number)
+    .filter((id) => id > 0)
+    .map((id) => itemName(id));
+
+  // Full-timeline analysis — best-effort: falls back to the aggregate stats if the
+  // timeline can't be fetched (too old / Riot error) or parsed.
+  let timeline: GameTimelineAnalysis = { available: false, reason: "not fetched" };
+  try {
+    const raw = await getCachedTimeline(ctx.matchId, ctx.region ?? "euw");
+    if (raw) {
+      const partsMeta: PMeta[] = rows.map((x) => ({
+        participantId: Number(x.participant_id),
+        puuid: String(x.puuid),
+        teamId: Number(x.team_id),
+        role: String(x.role ?? ""),
+        champion: String(x.champion_name ?? ""),
+      }));
+      timeline = analyzeGameTimeline(raw, partsMeta, ctx.puuid);
+    }
+  } catch {
+    timeline = { available: false, reason: "timeline fetch failed" };
+  }
+
+  return {
+    champion: g.champion_name,
+    role: g.role,
+    win: !!g.win,
+    kda: `${g.kills}/${g.deaths}/${g.assists}`,
+    cs: Number(g.total_cs),
+    cs_per_min: mins > 0 ? Number((Number(g.total_cs) / mins).toFixed(1)) : null,
+    duration_min: Math.round(mins),
+    kp_pct: pct(g.kill_participation),
+    damage_share_pct: pct(g.damage_share),
+    damage_to_champions: Number(g.total_damage_to_champions),
+    vision: Number(g.vision_score),
+    solo_kills: Number(g.solo_kills),
+    gold: Number(g.gold_earned),
+    at_10:
+      g.cs_at_10 == null
+        ? null
+        : {
+            cs: Number(g.cs_at_10),
+            gold: Number(g.gold_at_10),
+            kda: `${g.kills_at_10 ?? 0}/${g.deaths_at_10 ?? 0}/${g.assists_at_10 ?? 0}`,
+          },
+    items_built,
+    timeline,
+    hint: "This is the ONE game the user attached. `timeline` is a POSITION-AWARE breakdown of the FULL match: deaths[] (zone on the map, alone = allies_nearby 0, in_lane vs roaming, enemies_involved), death_summary (alone/roaming/in_own_lane/by_zone/first_death_min), deaths_away_from_objective (died far from a contested dragon/baron/herald), laning (gold/cs/xp diff vs your direct opponent at 10 & 14 min) and kp_pct_timeline. USE IT to explain CONCRETELY what went wrong — cite times, zones and diffs (e.g. 'you died bot-side 5/11 times though you're TOP = over-roaming', 'died alone in 7 deaths = positioning', 'down 1.4k gold to your laner by 10', 'died top at 24:10 while baron was being taken bot'). If timeline.available is false, use the aggregate fields and note the per-event detail wasn't recorded for this game. Give 2-3 specific, actionable takeaways grounded in these numbers.",
+  };
 }
 
 // ── Precise full rune page (for the rune_page embed) ─────────────────────────
