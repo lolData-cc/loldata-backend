@@ -12,6 +12,7 @@ import {
   getMatchIdsByPuuidOpts,
 } from "../riot";
 import { getCurrentSeasonWindow } from "../season";
+import { notifyAdmin, esc } from "../services/telegram";
 
 // ─── constants ─────────────────────────────────────────────────────────
 const MAX_PLAYERS_PER_LOBBY = 20;
@@ -240,6 +241,11 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
     console.error("scout_lobbies insert error:", lobbyErr);
     return Response.json({ error: "Failed to create lobby" }, { status: 500 });
   }
+
+  // Admin feed — a new scout lobby was created.
+  void notifyAdmin(
+    `🔭 <b>New scout lobby</b>\n<b>${esc(name)}</b> · ${players.length} player${players.length === 1 ? "" : "s"}\nhttps://loldata.cc/scout/${slug}`,
+  );
 
   // Insert players + accounts
   for (let pIdx = 0; pIdx < players.length; pIdx++) {

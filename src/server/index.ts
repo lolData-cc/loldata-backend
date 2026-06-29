@@ -27,7 +27,11 @@ import { getItemStatsHandler } from "./routes/getItemStats"
 import { getItemBestUtilizersHandler } from "./routes/getItemBestUtilizers"
 import { getChampionMatchupsHandler } from "./routes/getChampionMatchups"
 import { getChampionDuosHandler } from "./routes/getChampionDuos"
-import { aiChatHandler, aiHistoryHandler } from "./routes/aiChat"
+import { aiChatHandler, aiHistoryHandler, aiCreditsHandler } from "./routes/aiChat"
+import { creditGrantFields } from "./ai/credits"
+import { supabaseHookHandler, adminHookTestHandler } from "./routes/adminHooks"
+import { contactHandler } from "./routes/contact"
+import { notifyAdmin, esc } from "./services/telegram"
 import { getChampionBuildHandler } from "./routes/getChampionBuild"
 import { getChampionBuildStatsHandler } from "./routes/getChampionBuildStats"
 import { getSeasonStatsHandler } from "./routes/season_stats";
@@ -298,11 +302,23 @@ async function stripeWebhookHandler(req: Request) {
           .from("profile_players")
           .update({
             plan,
+            // New subscription → grant the plan's AI credit allotment immediately.
+            ...creditGrantFields(plan),
             stripe_subscription_id: sub.id,
             subscription_status: sub.status,
             current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
           })
           .eq("profile_id", profileId);
+
+        // Admin feed — a new paying subscriber. 💸
+        const { data: prof } = await supabaseAdmin
+          .from("profile_players")
+          .select("nametag")
+          .eq("profile_id", profileId)
+          .single();
+        void notifyAdmin(
+          `💸 <b>New ${plan.toUpperCase()} subscriber</b>\n${esc(prof?.nametag || profileId)} — ${plan === "elite" ? "€14.99/mo" : "€3.49/mo"}`,
+        );
       }
     }
 
@@ -322,15 +338,44 @@ async function stripeWebhookHandler(req: Request) {
 
       const profileId = rows?.[0]?.profile_id;
       if (profileId) {
+        const nextPlan = sub.status === "canceled" ? "free" : plan;
+        // Re-grant the AI credit allotment only when the tier actually changes
+        // (upgrade / downgrade / cancel) — never on incidental subscription
+        // updates or mid-cycle. Renewals are covered by the lazy monthly refill.
+        const { data: cur } = await supabaseAdmin
+          .from("profile_players")
+          .select("plan")
+          .eq("profile_id", profileId)
+          .single();
+        const oldPlan = cur?.plan ?? "free";
+        const planChanged = oldPlan !== nextPlan;
         await supabaseAdmin
           .from("profile_players")
           .update({
-            plan: sub.status === "canceled" ? "free" : plan,
+            plan: nextPlan,
+            ...(planChanged ? creditGrantFields(nextPlan) : {}),
             stripe_subscription_id: sub.id,
             subscription_status: sub.status,
             current_period_end: new Date(sub.current_period_end * 1000).toISOString(),
           })
           .eq("profile_id", profileId);
+
+        // Admin feed — cancellation or a tier change of an EXISTING sub. A brand
+        // new subscription is announced by checkout.session.completed above, so
+        // skip the free→paid case here to avoid a double ping.
+        if (planChanged && oldPlan !== "free") {
+          const { data: prof } = await supabaseAdmin
+            .from("profile_players")
+            .select("nametag")
+            .eq("profile_id", profileId)
+            .single();
+          const who = esc(prof?.nametag || profileId);
+          void notifyAdmin(
+            nextPlan === "free"
+              ? `📉 <b>Subscription cancelled</b>\n${who} — ${oldPlan} → free`
+              : `🔁 <b>Plan changed</b>\n${who} — ${oldPlan} → ${nextPlan}`,
+          );
+        }
       }
     }
 
@@ -574,6 +619,24 @@ if (pathname === "/api/ai/chat" && req.method === "POST") {
 
 if (pathname === "/api/ai/history" && (req.method === "GET" || req.method === "DELETE")) {
   return withLogAndCors(req, pathname, aiHistoryHandler);
+}
+
+if (pathname === "/api/ai/credits" && req.method === "GET") {
+  return withLogAndCors(req, pathname, aiCreditsHandler);
+}
+
+// Admin event feed — Supabase DB-webhook sink + a wiring test (secret-gated).
+if (pathname === "/api/admin/hooks/supabase" && req.method === "POST") {
+  return withLogAndCors(req, pathname, supabaseHookHandler);
+}
+
+if (pathname === "/api/admin/hooks/test" && req.method === "GET") {
+  return withLogAndCors(req, pathname, adminHookTestHandler);
+}
+
+// Public contact form → admin Telegram feed.
+if (pathname === "/api/contact" && req.method === "POST") {
+  return withLogAndCors(req, pathname, contactHandler);
 }
 
 if (pathname === "/api/champion/build" && req.method === "POST") {

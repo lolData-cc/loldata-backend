@@ -22,6 +22,7 @@ import {
 import { warmChampClasses } from "../explorer/champClass";
 import { warmItemData } from "../ai/itemData";
 import { loadHistory, saveTurn, clearHistory } from "../ai/chatStore";
+import { tryConsume, refund, getBalance } from "../ai/credits";
 import { supabaseAdmin } from "../supabase/client";
 
 // Warm the Data Dragon maps in the background so the first question is fast.
@@ -185,6 +186,21 @@ export async function aiChatHandler(req: Request): Promise<Response> {
   };
 
   const userId = await userIdFromReq(req);
+  // Credits are per-account, so the AI requires a signed-in user. The chat only
+  // renders on the (auth-gated) Learn page, so this never blocks the real UI.
+  if (!userId) {
+    return Response.json({ error: "Sign in to use lolData AI." }, { status: 401 });
+  }
+
+  // Charge 1 credit up-front. Out of credits → 402 with the live balance so the
+  // UI can show "resets in …" (free) or an upgrade nudge (paid).
+  const spend = await tryConsume(userId, 1);
+  if (!spend.ok) {
+    return Response.json(
+      { error: "out_of_credits", credits: 0, plan: spend.plan, resetAt: spend.resetAt },
+      { status: 402 },
+    );
+  }
 
   try {
     const toolLog: ToolLogEntry[] = [];
@@ -194,13 +210,16 @@ export async function aiChatHandler(req: Request): Promise<Response> {
     // real tool outputs — the frontend renders these between text and actions.
     const embeds = collectEmbeds(toolLog);
     // Persist the turn per-account (fire-and-forget; never blocks the reply).
-    if (userId && answer) {
+    if (answer) {
       const lastUser = messages[messages.length - 1];
       const userText = typeof lastUser?.content === "string" ? lastUser.content : "";
       if (userText) void saveTurn(userId, userText, { content: answer, actions, embeds });
     }
-    return Response.json({ answer: answer || "I couldn't find an answer to that.", actions, embeds });
+    // `credits` = the balance left AFTER this request, so the UI updates live.
+    return Response.json({ answer: answer || "I couldn't find an answer to that.", actions, embeds, credits: spend.credits });
   } catch (e: any) {
+    // The agent failed after we charged — give the credit back so errors are free.
+    void refund(userId);
     const msg = String(e?.message ?? e);
     console.error("[ai/chat] error:", msg, "| model:", AI_MODEL);
     // Surface auth/quota issues distinctly so they're easy to spot in logs.
@@ -209,6 +228,14 @@ export async function aiChatHandler(req: Request): Promise<Response> {
     // etc.) so it's visible while wiring this up.
     return Response.json({ error: "The analyst hit an error — try again in a moment.", detail: msg }, { status });
   }
+}
+
+// GET /api/ai/credits → the signed-in user's AI credit balance (lazily refilled).
+export async function aiCreditsHandler(req: Request): Promise<Response> {
+  const userId = await userIdFromReq(req);
+  if (!userId) return Response.json({ credits: 0, plan: "free", resetAt: null });
+  const bal = await getBalance(userId);
+  return Response.json(bal);
 }
 
 // GET /api/ai/history → the signed-in user's stored conversation.
