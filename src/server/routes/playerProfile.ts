@@ -8,6 +8,7 @@
 import { supabaseAdmin } from "../supabase/client";
 import { explorerPool } from "../explorer/pool";
 import { getAccountByRiotId, getRankedDataBySummonerId } from "../riot";
+import { getApexCutoffs } from "../services/apexCutoffs";
 
 const slugify = (s: string) =>
   String(s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -141,7 +142,12 @@ export async function playerProfileHandler(req: Request): Promise<Response> {
       } finally { client.release(); }
     }
 
-    const data = { ...identity, accounts, topChampions };
+    // Apex (Master+) accounts need the GM/Challenger LP cutoffs to draw their
+    // progress-to-next-rank bar; only hit the table when there's an apex account.
+    const hasApex = accounts.some((a) => a.tier && (a.tier === "MASTER" || a.tier === "GRANDMASTER" || a.tier === "CHALLENGER"));
+    const cutoffs = hasApex ? await getApexCutoffs() : {};
+
+    const data = { ...identity, accounts, topChampions, cutoffs };
     _cache.set(slug, { ts: Date.now(), data });
     return Response.json(data);
   } catch (e: any) {

@@ -154,6 +154,17 @@ export async function getRankedDataBySummonerId(summonerId: string, region: stri
   return res.json();
 }
 
+// Challenger / Grandmaster apex league for a region (solo queue). The response's
+// `entries` array holds every apex player's leaguePoints — min = the cutoff to
+// enter that tier, max = the #1 player. Powers the apex progress bars.
+export async function getApexLeague(tier: "challenger" | "grandmaster", region: string) {
+  const routing = regionRouting[region.toUpperCase() as keyof typeof regionRouting];
+  if (!routing?.platform) throw new Error(`Unsupported region: ${region}`);
+  const url = `https://${routing.platform}/lol/league/v4/${tier}leagues/by-queue/RANKED_SOLO_5x5`;
+  const res = await riotFetch(url);
+  return res.json();
+}
+
 export async function getMatchDetails(matchId: string, region: string) {
   const routing = regionRouting[region.toUpperCase()];
   const url = `https://${routing.match}/lol/match/v5/matches/${matchId}`;

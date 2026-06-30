@@ -172,6 +172,11 @@ startPatchDiffSweep();
 import { startTierlistNightly } from "./services/tierlistPeriodic";
 startTierlistNightly();
 
+// Refresh the GM/Challenger LP cutoffs per region nightly (powers the /players
+// apex progress bars). Runs ~30s after boot, then daily.
+import { startApexCutoffSweep } from "./services/apexCutoffs";
+startApexCutoffSweep();
+
 // Pre-warm the champion Build-tab cache (POST /api/champion/build). Cold it's a
 // 3-7s aggregation over participants; warm it's ~0.2s. The cache is in-process,
 // so without this every champion's first visitor after a deploy/6h-expiry ate
