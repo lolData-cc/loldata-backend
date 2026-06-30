@@ -31,6 +31,21 @@ const TALENT_TABLE = { pro: "pro_players", streamer: "streamers" } as const;
 type Type = "pro" | "streamer";
 const okType = (t: any): t is Type => t === "pro" || t === "streamer";
 
+// GET /api/admin/talent?type=pro&ownerId=...  → { accounts:[{id,username,region}], socials:{...} }
+// Admin read for the linking UI (streamer_accounts isn't browser-readable).
+export async function talentGetHandler(req: Request): Promise<Response> {
+  if (!(await adminUserId(req))) return forbidden();
+  const url = new URL(req.url);
+  const type = url.searchParams.get("type");
+  const ownerId = url.searchParams.get("ownerId");
+  if (!okType(type) || !ownerId) return bad("type, ownerId required");
+  const { data: accounts } = await supabaseAdmin
+    .from(ACC_TABLE[type]).select("id, username, region").eq(OWNER_COL[type], ownerId).order("created_at");
+  const cols = type === "pro" ? "region, twitter_url, youtube_url, twitch_url" : "region, twitter_url, youtube_url";
+  const { data: talent } = await supabaseAdmin.from(TALENT_TABLE[type]).select(cols).eq("id", ownerId).maybeSingle();
+  return Response.json({ accounts: accounts ?? [], socials: talent ?? {} });
+}
+
 // POST /api/admin/talent/account/add  { type, ownerId, username, region }
 export async function talentAccountAddHandler(req: Request): Promise<Response> {
   if (!(await adminUserId(req))) return forbidden();

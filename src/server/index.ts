@@ -88,7 +88,7 @@ import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
 import { patchNotesHandler, patchLatestMapHandler, patchLatestChangesHandler } from "./routes/patchNotes";
 import { playerProfileHandler } from "./routes/playerProfile";
-import { talentAccountAddHandler, talentAccountRemoveHandler, talentSaveHandler } from "./routes/playerAdmin";
+import { talentGetHandler, talentAccountAddHandler, talentAccountRemoveHandler, talentSaveHandler } from "./routes/playerAdmin";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
 import { getLivegameStatsHandler } from "./routes/livegameStats";
@@ -935,6 +935,9 @@ if (pathname.startsWith("/api/players/") && req.method === "GET") {
 }
 
 // Admin-only talent (pro/streamer) account + social linking.
+if (pathname === "/api/admin/talent" && req.method === "GET") {
+  return withLogAndCors(req, pathname, talentGetHandler);
+}
 if (pathname === "/api/admin/talent/account/add" && req.method === "POST") {
   return withLogAndCors(req, pathname, talentAccountAddHandler);
 }
