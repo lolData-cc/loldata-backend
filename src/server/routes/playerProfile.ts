@@ -104,19 +104,33 @@ export async function playerProfileHandler(req: Request): Promise<Response> {
       .filter((a) => a.username && !seen.has(a.username.toLowerCase()) && seen.add(a.username.toLowerCase()))
       .map((a) => {
         const [name, tag = ""] = a.username.split("#");
-        return { nametag: a.username, name, tag, region: normRegion(a.region, tag) };
+        // `region` = the stored/admin region (best guess for the platform);
+        // `tagRegion` = the region implied by the Riot tagline. League data is
+        // per-platform, so if an admin mis-set the region (e.g. an EUW account
+        // tagged #EUW stored as "NA"), the rank lookup is retried on tagRegion.
+        return { nametag: a.username, name, tag, region: normRegion(a.region, tag), tagRegion: normRegion(null, tag) };
       });
 
     // ── per-account live solo-queue rank (Riot) ──
     const accounts: Account[] = await Promise.all(accInputs.map(async (a) => {
       const base: Account = { nametag: a.nametag, region: a.region, tier: null, division: null, lp: null, wins: 0, losses: 0, puuid: null, lastGameMs: null };
       try {
+        // account-v1 by-riot-id is global → the puuid resolves on any cluster.
         const acct = await getAccountByRiotId(a.name, a.tag, a.region);
         base.puuid = acct?.puuid ?? null;
         if (base.puuid) {
-          const ranked = await getRankedDataBySummonerId(base.puuid, a.region);
-          const solo = ((ranked as any[]) ?? []).find((e: any) => e.queueType === "RANKED_SOLO_5x5");
-          if (solo) { base.tier = solo.tier; base.division = solo.rank; base.lp = solo.leaguePoints; base.wins = solo.wins; base.losses = solo.losses; }
+          // Try the stored region first, then the tag-inferred one: an EUW
+          // account whose region was mis-set to NA would otherwise read NA's
+          // (empty) ladder and show as unranked. Land on the region that hits.
+          for (const reg of [...new Set([a.region, a.tagRegion])]) {
+            const ranked = await getRankedDataBySummonerId(base.puuid, reg);
+            const solo = ((ranked as any[]) ?? []).find((e: any) => e.queueType === "RANKED_SOLO_5x5");
+            if (solo) {
+              base.tier = solo.tier; base.division = solo.rank; base.lp = solo.leaguePoints;
+              base.wins = solo.wins; base.losses = solo.losses; base.region = reg;
+              break;
+            }
+          }
         }
       } catch { /* unreachable account → leave unranked */ }
       return base;
