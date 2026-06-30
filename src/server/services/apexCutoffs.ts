@@ -2,9 +2,11 @@
 // Nightly snapshot of the Grandmaster + Challenger LP cutoffs per region, so the
 // /players apex progress bars know how far a Master/GM/Challenger is toward the
 // next rank. Per region we read the apex leagues and store:
-//   gm_cutoff         = lowest LP among Grandmaster players (entry to GM)
-//   challenger_cutoff = lowest LP among Challenger players (entry to Challenger)
+//   gm_cutoff         = MEDIAN LP among Grandmaster players (real GM bulk)
+//   challenger_cutoff = MEDIAN LP among Challenger players (real Challenger bulk)
 //   challenger_max    = highest Challenger LP (rank 1)
+// Median, not min: the apex leagues carry a low-LP tail of ghost entries that
+// makes a min-based cutoff useless (see apexStats).
 
 import { explorerPool } from "../explorer/pool";
 import { getApexLeague } from "../riot";
@@ -32,16 +34,18 @@ function ensure(): Promise<void> {
   return _ensured;
 }
 
-function minMaxLp(league: any): { min: number | null; max: number | null } {
-  const entries = Array.isArray(league?.entries) ? league.entries : [];
-  if (!entries.length) return { min: null, max: null };
-  let min = Infinity, max = -Infinity;
-  for (const e of entries) {
-    const lp = Number(e?.leaguePoints ?? 0);
-    if (lp < min) min = lp;
-    if (lp > max) max = lp;
-  }
-  return { min: Number.isFinite(min) ? min : null, max: Number.isFinite(max) ? max : null };
+// The cutoff is the MEDIAN LP of the tier, not the raw minimum: the apex leagues
+// carry a long tail of just-promoted / decaying "ghost" entries at very low LP
+// (e.g. an EUW Grandmaster sitting at 71 LP) that would make a min-based cutoff
+// meaningless. The median tracks the real bulk of the tier (~1800 LP for EUW GM,
+// ~2490 for EUW Challenger). `max` is the #1 player.
+function apexStats(league: any): { cutoff: number | null; max: number | null } {
+  const lps: number[] = (Array.isArray(league?.entries) ? league.entries : [])
+    .map((e: any) => Number(e?.leaguePoints ?? 0))
+    .filter((x: number) => Number.isFinite(x))
+    .sort((a: number, b: number) => a - b);
+  if (!lps.length) return { cutoff: null, max: null };
+  return { cutoff: lps[Math.floor(lps.length / 2)], max: lps[lps.length - 1] };
 }
 
 export async function refreshApexCutoffs(): Promise<void> {
@@ -52,8 +56,8 @@ export async function refreshApexCutoffs(): Promise<void> {
         getApexLeague("challenger", region),
         getApexLeague("grandmaster", region),
       ]);
-      const c = minMaxLp(chall);
-      const g = minMaxLp(gm);
+      const c = apexStats(chall);
+      const g = apexStats(gm);
       const conn = await explorerPool().connect();
       try {
         await conn.query(
@@ -62,10 +66,10 @@ export async function refreshApexCutoffs(): Promise<void> {
            ON CONFLICT (region) DO UPDATE SET
              gm_cutoff = EXCLUDED.gm_cutoff, challenger_cutoff = EXCLUDED.challenger_cutoff,
              challenger_max = EXCLUDED.challenger_max, updated_at = now()`,
-          [region, g.min, c.min, c.max]
+          [region, g.cutoff, c.cutoff, c.max]
         );
       } finally { conn.release(); }
-      console.log(`[apex] ${region}: GM≥${g.min} CHALL≥${c.min} #1=${c.max}`);
+      console.log(`[apex] ${region}: GM~${g.cutoff} CHALL~${c.cutoff} #1=${c.max}`);
     } catch (e) {
       console.warn(`[apex] ${region} failed:`, (e as any)?.message ?? e);
     }
