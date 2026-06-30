@@ -87,6 +87,7 @@ import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlis
 import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
 import { patchNotesHandler, patchLatestMapHandler, patchLatestChangesHandler } from "./routes/patchNotes";
+import { playerProfileHandler } from "./routes/playerProfile";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
 import { getLivegameStatsHandler } from "./routes/livegameStats";
@@ -925,6 +926,11 @@ if (pathname === "/api/patch-notes/latest-changes" && req.method === "GET") {
 
 if (pathname === "/api/patch-notes" && req.method === "GET") {
   return withLogAndCors(req, pathname, patchNotesHandler);
+}
+
+// Unified pro/streamer profile for the /players/<slug> map page (:slug param).
+if (pathname.startsWith("/api/players/") && req.method === "GET") {
+  return withLogAndCors(req, pathname, playerProfileHandler);
 }
 
 if (pathname === "/api/player-ranks" && req.method === "POST") {
