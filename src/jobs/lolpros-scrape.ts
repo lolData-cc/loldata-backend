@@ -229,20 +229,30 @@ async function upsertProfile(p: Profile): Promise<"ok" | "skipped"> {
 }
 
 // ── discovery ──
+// LOLPros has one ladder per tracked shard (verified 2026-07-02: EUW, NA, BR
+// respond; KR/EUNE/etc. 500). Player profiles are shard-agnostic — accounts
+// carry their own `server` — but DISCOVERY must sweep every ladder or the
+// NA/BR-only pros are never found.
+const LADDER_SERVERS = ["EUW", "NA", "BR"] as const;
+
 async function discoverSlugs(): Promise<string[]> {
   const slugs = new Set<string>();
 
   // smoke tests (--limit N) shouldn't pay for the full enumeration
   const ladderCap = LIMIT === Infinity ? MAX_LADDER_PAGES : 3;
 
-  console.log("discovering: ladder…");
-  for (let page = 1; page <= ladderCap; page++) {
-    const items = await fetchJson<LadderItem[]>(`/ladder?page=${page}`);
-    if (!items || !items.length) break;
-    for (const it of items) if (it.slug) slugs.add(it.slug);
-    if (page % 25 === 0) console.log(`  ladder page ${page} → ${slugs.size} slugs so far`);
+  for (const server of LADDER_SERVERS) {
+    console.log(`discovering: ladder ${server}…`);
+    const before = slugs.size;
+    for (let page = 1; page <= ladderCap; page++) {
+      const items = await fetchJson<LadderItem[]>(`/ladder?page=${page}&server=${server}`);
+      if (!items || !items.length) break;
+      for (const it of items) if (it.slug) slugs.add(it.slug);
+      if (page % 25 === 0) console.log(`  ${server} page ${page} → ${slugs.size} slugs so far`);
+    }
+    console.log(`ladder ${server} done → +${slugs.size - before} (total ${slugs.size})`);
+    if (LIMIT !== Infinity) break; // smoke test: first ladder only
   }
-  console.log(`ladder done → ${slugs.size} slugs`);
   if (LIMIT !== Infinity) return [...slugs]; // smoke test: ladder sample only
 
   console.log("discovering: teams…");

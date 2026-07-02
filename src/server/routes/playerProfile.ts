@@ -13,19 +13,23 @@ import { getApexCutoffs } from "../services/apexCutoffs";
 const slugify = (s: string) =>
   String(s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-type Region = "EUW" | "EUNE" | "NA" | "KR";
+type Region = "EUW" | "EUNE" | "NA" | "KR" | "BR" | "LAN" | "LAS" | "OCE" | "JP" | "TR" | "RU";
+// Every riot.ts routing key, longest-prefix first so "EUNE" wins over "EUW"
+// and "LAS" doesn't get eaten by "LAN".
+const REGIONS: Region[] = ["EUNE", "EUW", "LAN", "LAS", "OCE", "NA", "KR", "BR", "JP", "TR", "RU"];
 // Stored region OR (fallback) inferred from the Riot tag → a riot.ts routing key.
+// Do NOT blind-default to EUW when the stored server is a real region — pro
+// accounts (lolpros import) live on NA/BR/KR shards too.
 function normRegion(stored: string | null | undefined, tag: string): Region {
   const s = String(stored || "").toUpperCase();
-  if (s.startsWith("EUW")) return "EUW";
-  if (s.startsWith("EUN")) return "EUNE";
-  if (s.startsWith("NA")) return "NA";
-  if (s.startsWith("KR")) return "KR";
+  if (s.startsWith("EUN")) return "EUNE"; // accepts "EUN1" too
+  for (const r of REGIONS) if (s === r || s.startsWith(r)) return r;
   const t = String(tag || "").toUpperCase();
   if (t.includes("EUW")) return "EUW";
   if (t.includes("EUN")) return "EUNE";
   if (t.includes("KR")) return "KR";
   if (t.includes("NA")) return "NA";
+  if (t.includes("BR")) return "BR";
   return "EUW";
 }
 

@@ -50,6 +50,43 @@ const regionRouting = {
     match: "asia.api.riotgames.com",
     platform: "kr.api.riotgames.com",
   },
+  // Pro accounts (lolpros import) live on more shards than the original four —
+  // NA/BR ladders exist on lolpros, and generic coverage costs nothing here.
+  BR: {
+    account: "americas.api.riotgames.com",
+    match: "americas.api.riotgames.com",
+    platform: "br1.api.riotgames.com",
+  },
+  LAN: {
+    account: "americas.api.riotgames.com",
+    match: "americas.api.riotgames.com",
+    platform: "la1.api.riotgames.com",
+  },
+  LAS: {
+    account: "americas.api.riotgames.com",
+    match: "americas.api.riotgames.com",
+    platform: "la2.api.riotgames.com",
+  },
+  OCE: {
+    account: "americas.api.riotgames.com",
+    match: "sea.api.riotgames.com",
+    platform: "oc1.api.riotgames.com",
+  },
+  JP: {
+    account: "asia.api.riotgames.com",
+    match: "asia.api.riotgames.com",
+    platform: "jp1.api.riotgames.com",
+  },
+  TR: {
+    account: "europe.api.riotgames.com",
+    match: "europe.api.riotgames.com",
+    platform: "tr1.api.riotgames.com",
+  },
+  RU: {
+    account: "europe.api.riotgames.com",
+    match: "europe.api.riotgames.com",
+    platform: "ru.api.riotgames.com",
+  },
 }
 
 

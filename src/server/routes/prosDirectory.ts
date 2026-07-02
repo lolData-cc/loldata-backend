@@ -143,15 +143,17 @@ export async function prosSearchHandler(req: Request): Promise<Response> {
     const [cloud, box] = await Promise.all([
       supabaseAdmin
         .from("pro_players")
-        .select("username, nickname, profile_image_url, team")
+        .select("username, nickname, profile_image_url, team, region")
         .or(`nickname.ilike.${like},username.ilike.${like}`)
         .limit(3),
       explorerPool().query(
-        `SELECT p.slug, p.name, p.team_tag, p.team_name,
-                (SELECT a.summoner_name FROM pro_accounts a
-                  WHERE a.pro_id = p.id
-                  ORDER BY a.league_points DESC NULLS LAST LIMIT 1) AS main_account
+        `SELECT p.slug, p.name, p.team_tag, p.team_name, m.summoner_name AS main_account, m.server AS main_server
            FROM pros p
+           LEFT JOIN LATERAL (
+             SELECT a.summoner_name, a.server FROM pro_accounts a
+              WHERE a.pro_id = p.id
+              ORDER BY a.league_points DESC NULLS LAST LIMIT 1
+           ) m ON true
           WHERE p.name ILIKE $1 OR p.slug ILIKE $1
           ORDER BY p.lolpros_score DESC NULLS LAST
           LIMIT 3`,
@@ -159,7 +161,9 @@ export async function prosSearchHandler(req: Request): Promise<Response> {
       ),
     ]);
 
-    type Sug = { name: string; tag: string; nickname: string | null; avatar: string | null; team: string | null; slug: string };
+    // `region` = the ACCOUNT's real shard (EUW/NA/BR/KR…) so the search dialog
+    // routes to the right summoner page — never assume the selected region.
+    type Sug = { name: string; tag: string; nickname: string | null; avatar: string | null; team: string | null; slug: string; region: string | null };
     const out: Sug[] = [];
     const seen = new Set<string>();
     for (const p of (cloud.data ?? []) as any[]) {
@@ -167,7 +171,7 @@ export async function prosSearchHandler(req: Request): Promise<Response> {
       const k = (p.nickname || name).toLowerCase();
       if (!name || seen.has(k)) continue;
       seen.add(k);
-      out.push({ name, tag, nickname: p.nickname ?? null, avatar: p.profile_image_url ?? null, team: p.team ?? null, slug: slugify(p.nickname || name) });
+      out.push({ name, tag, nickname: p.nickname ?? null, avatar: p.profile_image_url ?? null, team: p.team ?? null, slug: slugify(p.nickname || name), region: p.region ?? null });
     }
     for (const r of box.rows as any[]) {
       if (!r.main_account) continue;
@@ -175,7 +179,7 @@ export async function prosSearchHandler(req: Request): Promise<Response> {
       if (seen.has(k)) continue;
       seen.add(k);
       const [name, tag = ""] = String(r.main_account).split("#");
-      out.push({ name, tag, nickname: r.name, avatar: null, team: r.team_tag ?? r.team_name ?? null, slug: r.slug });
+      out.push({ name, tag, nickname: r.name, avatar: null, team: r.team_tag ?? r.team_name ?? null, slug: r.slug, region: r.main_server ?? null });
       if (out.length >= 3) break;
     }
 
