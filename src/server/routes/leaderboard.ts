@@ -8,6 +8,7 @@ import {
   getAccountByPuuid,
 } from "../riot";
 import { supabaseAdmin } from "../supabase/client";
+import { getBadgeData } from "../services/proBadges";
 
 const LADDER_TTL_MS = 60_000;      // cache lista base (CH+GM+M) 1 min
 const ENRICH_TTL_MS = 3_600_000;   // cache enrichment 1 h
@@ -231,18 +232,9 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
       }
     }
 
-    // Fetch pro players and streamers in bulk
-    const nametags = enriched.map((e: any) => e.nametag).filter(Boolean);
-    const proSet = new Set<string>();
-    const streamerSet = new Set<string>();
-    if (nametags.length > 0) {
-      const [{ data: pros }, { data: streamers }] = await Promise.all([
-        supabaseAdmin.from("pro_players").select("username, team"),
-        supabaseAdmin.from("streamers").select("lol_nametag"),
-      ]);
-      if (pros) for (const p of pros) proSet.add(p.username?.toLowerCase());
-      if (streamers) for (const s of streamers) streamerSet.add(s.lol_nametag?.toLowerCase());
-    }
+    // Pro/streamer badges: shared cached union of the box lolpros import +
+    // the curated Cloud tables (see services/proBadges).
+    const { pros: proSet, streamers: streamerSet } = await getBadgeData();
 
     const entriesWithChamps = enriched.map((e: any) => {
       const nt = (e.nametag ?? "").toLowerCase();

@@ -88,7 +88,7 @@ import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
 import { patchNotesHandler, patchLatestMapHandler, patchLatestChangesHandler } from "./routes/patchNotes";
 import { playerProfileHandler } from "./routes/playerProfile";
-import { prosDirectoryHandler } from "./routes/prosDirectory";
+import { prosDirectoryHandler, prosBadgeMapHandler, prosIdentityHandler, prosSearchHandler } from "./routes/prosDirectory";
 import { talentGetHandler, talentAccountAddHandler, talentAccountRemoveHandler, talentSaveHandler } from "./routes/playerAdmin";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
@@ -940,6 +940,18 @@ if (pathname === "/api/patch-notes" && req.method === "GET") {
 // :slug route below.
 if (pathname === "/api/pros" && req.method === "GET") {
   return withLogAndCors(req, pathname, prosDirectoryHandler);
+}
+
+// Pro/streamer badge + identity reads (box + Cloud merged server-side) — the
+// frontend points HERE, never at Supabase directly.
+if (pathname === "/api/pros/badge-map" && req.method === "GET") {
+  return withLogAndCors(req, pathname, prosBadgeMapHandler);
+}
+if (pathname === "/api/pros/identity" && req.method === "GET") {
+  return withLogAndCors(req, pathname, prosIdentityHandler);
+}
+if (pathname === "/api/pros/search" && req.method === "GET") {
+  return withLogAndCors(req, pathname, prosSearchHandler);
 }
 
 // Unified pro/streamer profile for the /players/<slug> map page (:slug param).
