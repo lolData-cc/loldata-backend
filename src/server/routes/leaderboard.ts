@@ -101,13 +101,23 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
           tier: e.tier,
         })),
       };
-      // Tier cutoffs (fixed by Riot) + player counts
+      // Real apex cutoffs + counts. Tiers interleave by LP near the boundary
+      // (decay: a challenger at 2238 LP can sit below a GM at 2265), so the
+      // cutoff isn't "min LP in tier" (a decayed ghost would poison it) nor a
+      // contiguous slice — it's the LP of the player at the tier's positional
+      // slot: challenger cutoff = LP of the Nth-ranked player where N = the
+      // challenger population; GM cutoff = LP at (challenger + GM) slots.
+      const rows = payload.rawEntries as { leaguePoints: number; tier: string }[];
+      const challengerCount = rows.filter((e) => e.tier === "CHALLENGER").length;
+      const grandmasterCount = rows.filter((e) => e.tier === "GRANDMASTER").length;
+      const masterCount = rows.filter((e) => e.tier === "MASTER").length;
+      const lpAt = (n: number) => (n > 0 && rows[n - 1] ? rows[n - 1].leaguePoints : null);
       payload.cutoffs = {
-        challenger: 800,
-        grandmaster: 400,
-        challengerCount: payload.rawEntries.filter((e: any) => e.tier === "CHALLENGER").length,
-        grandmasterCount: payload.rawEntries.filter((e: any) => e.tier === "GRANDMASTER").length,
-        masterCount: payload.rawEntries.filter((e: any) => e.tier === "MASTER").length,
+        challenger: lpAt(challengerCount),
+        grandmaster: lpAt(challengerCount + grandmasterCount),
+        challengerCount,
+        grandmasterCount,
+        masterCount,
       };
 
       ladderCache.set(cacheKey, { ts: now, body: payload });
