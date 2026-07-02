@@ -88,6 +88,7 @@ import { learnOverviewHandler } from "./routes/learn/overview";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
 import { patchNotesHandler, patchLatestMapHandler, patchLatestChangesHandler } from "./routes/patchNotes";
 import { playerProfileHandler } from "./routes/playerProfile";
+import { prosDirectoryHandler } from "./routes/prosDirectory";
 import { talentGetHandler, talentAccountAddHandler, talentAccountRemoveHandler, talentSaveHandler } from "./routes/playerAdmin";
 import { getPlayerRanksHandler } from "./routes/getPlayerRanks";
 import { riotAuthUrlHandler, riotAuthCallbackHandler } from "./routes/riotAuth";
@@ -932,6 +933,13 @@ if (pathname === "/api/patch-notes/latest-changes" && req.method === "GET") {
 
 if (pathname === "/api/patch-notes" && req.method === "GET") {
   return withLogAndCors(req, pathname, patchNotesHandler);
+}
+
+// Paginated directory of the scraped box pros (lolpros import) — admin
+// directory section + future /players index. Exact match: no clash with the
+// :slug route below.
+if (pathname === "/api/pros" && req.method === "GET") {
+  return withLogAndCors(req, pathname, prosDirectoryHandler);
 }
 
 // Unified pro/streamer profile for the /players/<slug> map page (:slug param).
