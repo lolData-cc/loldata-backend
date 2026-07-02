@@ -74,7 +74,44 @@ export async function playerProfileHandler(req: Request): Promise<Response> {
         avatar: pro.profile_image_url ?? null, isLive: false,
         socials: { twitter: pro.twitter_url ?? null, youtube: pro.youtube_url ?? null, twitch: pro.twitch_url ?? null },
       };
-    } else {
+    }
+
+    // ── box: scraped pros (lolpros import) — real UNIQUE slug column, so this
+    // is an indexed point lookup, not a scan. Curated Cloud pros win above.
+    if (!identity) {
+      const { rows: boxPros } = await explorerPool().query(
+        `SELECT id, name, country, position, team_name, team_logo, avatar_url,
+                twitter, twitch, youtube, instagram
+           FROM pros WHERE slug = $1`,
+        [slug]
+      );
+      if (boxPros.length) {
+        const bp = boxPros[0] as Record<string, any>;
+        const { rows: accs } = await explorerPool().query(
+          `SELECT summoner_name, server FROM pro_accounts
+            WHERE pro_id = $1
+            ORDER BY league_points DESC NULLS LAST, summoner_name`,
+          [bp.id]
+        );
+        rawAccounts = (accs as any[]).map((a) => ({ username: a.summoner_name, region: a.server }));
+        identity = {
+          type: "pro", slug,
+          name: bp.name, nickname: bp.name, realName: null,
+          team: bp.team_name ?? null, teamLogo: bp.team_logo ?? null,
+          nationality: bp.country ?? null,
+          avatar: bp.avatar_url ?? null, isLive: false,
+          position: bp.position ?? null,
+          socials: {
+            twitter: bp.twitter ?? null,
+            youtube: bp.youtube ?? null,
+            twitch: bp.twitch ?? null,
+            instagram: bp.instagram ?? null,
+          },
+        };
+      }
+    }
+
+    if (!identity) {
       const { data: streamers } = await supabaseAdmin
         .from("streamers")
         .select("id, lol_nametag, twitch_login, region, profile_image_url, twitter_url, youtube_url, is_live");
