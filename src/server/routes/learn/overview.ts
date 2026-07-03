@@ -1,7 +1,7 @@
 // /api/learn/overview — Daily/weekly performance report for authenticated user
 import { getMatchDetails, getMatchIdsByPuuidOpts, RateLimitError } from "../../riot";
 import { getCurrentSeasonWindow } from "../../season";
-import { buildLpTrack, fetchTimelinesBounded, aggregateDeep, pickSpotlight } from "./overview-deep";
+import { buildLpTrack, fetchTimelinesBounded, aggregateDeep, pickSpotlight, buildDeepGames } from "./overview-deep";
 
 const TIMELINE_CAP = 8; // Riot cost bound: analyse ≤8 games of the period deeply
 
@@ -449,7 +449,7 @@ export async function learnOverviewHandler(req: Request): Promise<Response> {
       })
       .filter((g): g is NonNullable<typeof g> => !!g);
 
-    let lpTrack: any = null, deep: any = null, spotlight: any = null;
+    let lpTrack: any = null, deep: any = null, spotlight: any = null, deepGames: any[] = [];
     try {
       // LP track: chronological (oldest→newest) win/loss over the whole period
       const chrono = [...periodGames].reverse().map((g) => ({ win: !!g.me.win, champion: g.me.championName ?? "" }));
@@ -459,6 +459,9 @@ export async function learnOverviewHandler(req: Request): Promise<Response> {
         aggregateDeep(withTl.map((g) => g.deep)),
         pickSpotlight(withTl),
       ];
+      // per-game breakdown (newest-first) so the overview can let the user
+      // pick which game the timeline boxes show
+      deepGames = buildDeepGames(withTl);
     } catch (e) {
       console.error("⚠️ overview deep layer failed:", e);
     }
@@ -480,6 +483,8 @@ export async function learnOverviewHandler(req: Request): Promise<Response> {
       lpTrack,
       deep,
       spotlight,
+      deepGames,
+      spotlightMatchId: spotlight?.matchId ?? deepGames[0]?.matchId ?? null,
     });
   } catch (err) {
     console.error("❌ learnOverview error:", err);

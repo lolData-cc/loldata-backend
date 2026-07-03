@@ -318,6 +318,77 @@ export function aggregateDeep(deeps: (TimelineDeep | null)[]): DeepAggregates {
   };
 }
 
+// ── PER-GAME DEEP (selectable) ───────────────────────────────────────────────
+// Same timeline insights as the aggregate, but kept PER game so the overview
+// can let the user pick which game to inspect (laning / death clock /
+// objectives / gold curve are all game-specific). A superset of Spotlight.
+
+export type DeepGame = {
+  matchId: string;
+  champion: string;
+  role: string;
+  win: boolean;
+  kills: number; deaths: number; assists: number;
+  impact: number;
+  durationMin: number;
+  tag: string;
+  verdict: string;
+  laning: { goldDiff10: number | null; csDiff10: number | null; xpDiff10: number | null; cs10: number | null };
+  deathClock: { bucket: string; deaths: number }[];
+  objectiveParticipation: number | null;
+  goldCurve: { min: number; diff: number }[];
+  peak: { min: number; diff: number } | null;
+  trough: { min: number; diff: number } | null;
+  moments: { min: number; type: string; text: string }[];
+};
+
+function verdictTag(win: boolean, peakDiff: number, troughDiff: number, finalDiff: number, impact: number): { verdict: string; tag: string } {
+  if (win && troughDiff < -2500 && finalDiff > 0) return { verdict: "Comeback win — you clawed it back from behind", tag: "COMEBACK" };
+  if (win && peakDiff > 3500) return { verdict: "You stomped — a dominant lead start to finish", tag: "DOMINANT" };
+  if (win && impact >= 70) return { verdict: "Hard carry — your impact decided the game", tag: "CARRY" };
+  if (!win && peakDiff > 2500) return { verdict: "Threw a lead — you were ahead before it slipped", tag: "THROWN LEAD" };
+  if (!win && troughDiff < -3500) return { verdict: "Rough one — stomped early and couldn't recover", tag: "STOMPED" };
+  return win ? { verdict: "A win you earned", tag: "WIN" } : { verdict: "A loss to learn from", tag: "LOSS" };
+}
+
+/** Build a selectable per-game breakdown for every sampled timeline (newest-first
+ *  as given). Games without a usable timeline are dropped. */
+export function buildDeepGames(
+  games: { matchId: string; info: any; me: any; impact: number; deep: TimelineDeep | null }[]
+): DeepGame[] {
+  return games
+    .filter((g) => g.deep && g.deep.goldCurve.length > 3)
+    .map((g) => {
+      const d = g.deep!;
+      const curve = d.goldCurve;
+      const peak = curve.reduce((mx, p) => (p.diff > mx.diff ? p : mx), curve[0]);
+      const trough = curve.reduce((mn, p) => (p.diff < mn.diff ? p : mn), curve[0]);
+      const finalDiff = curve.length ? curve[curve.length - 1].diff : 0;
+      const win = !!g.me.win;
+      const { verdict, tag } = verdictTag(win, peak.diff, trough.diff, finalDiff, g.impact);
+
+      const clock = DEATH_BUCKETS.map((b) => ({ bucket: b, deaths: 0 }));
+      for (const m of d.deathMinutes) clock[Math.min(6, m >= 30 ? 6 : Math.floor(m / 5))].deaths++;
+
+      return {
+        matchId: g.matchId,
+        champion: g.me.championName ?? "?",
+        role: g.me.teamPosition || g.me.individualPosition || "",
+        win,
+        kills: g.me.kills ?? 0, deaths: g.me.deaths ?? 0, assists: g.me.assists ?? 0,
+        impact: g.impact,
+        durationMin: Math.round((g.info.gameDuration ?? 0) / 60),
+        tag, verdict,
+        laning: { goldDiff10: d.goldDiff10, csDiff10: d.csDiff10, xpDiff10: d.xpDiff10, cs10: d.cs10 },
+        deathClock: clock,
+        objectiveParticipation: d.teamObjectives > 0 ? Math.round((d.objectivesInvolved / d.teamObjectives) * 100) : null,
+        goldCurve: curve,
+        peak, trough,
+        moments: d.moments.slice(0, 6),
+      };
+    });
+}
+
 // analysed-timeline cache (30 min) — a completed match's timeline never changes,
 // so repeat overview loads / the 60s frontend cache never re-hit Riot for it.
 const tlCache = new Map<string, { deep: TimelineDeep | null; ts: number }>();
