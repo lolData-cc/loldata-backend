@@ -196,9 +196,21 @@ function computeStats(matches: any[], puuid: string) {
 
     const impact = computeImpact(me, info);
 
+    // MVP = best performer on the winning team, ACE = best on the losing team.
+    // Rank my own team by impact (tie-broken by KA − deaths); flag me if I'm top.
+    let bestPuuid = puuid, bestRank = -Infinity;
+    for (const p of info.participants) {
+      if (p.teamId !== myTeamId) continue;
+      const pImpact = p.puuid === puuid ? impact : computeImpact(p, info);
+      const rank = pImpact * 1000 + ((p.kills ?? 0) + (p.assists ?? 0)) * 10 - (p.deaths ?? 0);
+      if (rank > bestRank) { bestRank = rank; bestPuuid = p.puuid; }
+    }
+    const isTeamBest = bestPuuid === puuid;
+
     perGame.push({
       game: i + 1, matchId: m.metadata?.matchId ?? null,
       kda: +kda.toFixed(2), win, champion: champ, role, impact,
+      mvp: isTeamBest && win, ace: isTeamBest && !win,
       kills: k, deaths: d, assists: a,
       cspm: durationMin > 0 ? +(cs / durationMin).toFixed(1) : 0,
       dmgShare: teamDmg > 0 ? +((dmg / teamDmg) * 100).toFixed(1) : 0,
