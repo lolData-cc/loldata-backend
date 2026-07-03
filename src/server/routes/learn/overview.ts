@@ -1,6 +1,9 @@
-// /api/learn/overview — Daily performance report for authenticated user
+// /api/learn/overview — Daily/weekly performance report for authenticated user
 import { getMatchDetails, getMatchIdsByPuuidOpts, RateLimitError } from "../../riot";
 import { getCurrentSeasonWindow } from "../../season";
+import { buildLpTrack, fetchTimelinesBounded, aggregateDeep, pickSpotlight } from "./overview-deep";
+
+const TIMELINE_CAP = 8; // Riot cost bound: analyse ≤8 games of the period deeply
 
 // ── In-memory cache (shared with getMatches) ──
 const matchCache = new Map<string, { data: any; ts: number }>();
@@ -380,6 +383,7 @@ export async function learnOverviewHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json();
     const { puuid, region, nametag } = body;
+    const period: "day" | "week" = body.period === "week" ? "week" : "day";
 
     if (!puuid || !region) {
       return new Response("Missing puuid or region", { status: 400 });
@@ -403,36 +407,66 @@ export async function learnOverviewHandler(req: Request): Promise<Response> {
     }
 
     if (!allMatchIds || allMatchIds.length === 0) {
-      return Response.json({ today: null, baseline: null, strengths: [], weaknesses: [] });
+      return Response.json({ today: null, baseline: null, strengths: [], weaknesses: [], period });
     }
 
-    // Fetch match details in batches of 5
+    // Fetch match details in batches of 5 (35 recent = enough for a week window)
     const BATCH = 5;
     const matchDetails: any[] = [];
-    const toFetch = allMatchIds.slice(0, 30); // max 30 recent matches
+    const toFetch = allMatchIds.slice(0, 35);
 
     for (let i = 0; i < toFetch.length; i += BATCH) {
       const batch = toFetch.slice(i, i + BATCH);
-      const results = await Promise.allSettled(
-        batch.map(id => fetchMatch(id, region))
-      );
+      const results = await Promise.allSettled(batch.map(id => fetchMatch(id, region)));
       for (const r of results) {
         if (r.status === "fulfilled" && r.value) matchDetails.push(r.value);
       }
     }
+    // matchDetails is newest → oldest (Riot match-id order)
 
-    // Split into today's games (midnight to midnight) and baseline (rest)
+    // ── select the period ─────────────────────────────────────────────────
     const todayStr = todayKey();
-    const todayMatches = matchDetails.filter(m => matchDayKey(m.info) === todayStr);
-    const baselineMatches = matchDetails.filter(m => matchDayKey(m.info) !== todayStr).slice(0, 20);
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const inPeriod = (m: any) => {
+      if (period === "week") {
+        const ts = m.info.gameEndTimestamp ?? m.info.gameStartTimestamp ?? m.info.gameCreation;
+        return ts >= weekAgo;
+      }
+      return matchDayKey(m.info) === todayStr;
+    };
+    const periodMatches = matchDetails.filter(inPeriod);
+    const baselineMatches = matchDetails.filter(m => !inPeriod(m)).slice(0, 20);
 
-    const todayStats = computeStats(todayMatches, puuid);
+    const periodStats = computeStats(periodMatches, puuid);
     const baselineStats = computeStats(baselineMatches, puuid);
+    const { strengths, weaknesses } = computeStrengthsWeaknesses(periodStats, baselineStats);
 
-    const { strengths, weaknesses } = computeStrengthsWeaknesses(todayStats, baselineStats);
+    // ── deep layer (timeline + LP) — bounded, best-effort ──────────────────
+    const periodGames = periodMatches
+      .map((m) => {
+        const me = m.info.participants.find((p: any) => p.puuid === puuid);
+        return me ? { matchId: m.metadata.matchId, info: m.info, me, impact: computeImpact(me, m.info) } : null;
+      })
+      .filter((g): g is NonNullable<typeof g> => !!g);
+
+    let lpTrack: any = null, deep: any = null, spotlight: any = null;
+    try {
+      // LP track: chronological (oldest→newest) win/loss over the whole period
+      const chrono = [...periodGames].reverse().map((g) => ({ win: !!g.me.win, champion: g.me.championName ?? "" }));
+      const withTl = await fetchTimelinesBounded(periodGames, region, TIMELINE_CAP);
+      [lpTrack, deep, spotlight] = [
+        await buildLpTrack(chrono, puuid, region),
+        aggregateDeep(withTl.map((g) => g.deep)),
+        pickSpotlight(withTl),
+      ];
+    } catch (e) {
+      console.error("⚠️ overview deep layer failed:", e);
+    }
 
     return Response.json({
-      today: todayStats,
+      period,
+      periodLabel: period === "week" ? "This Week" : "Today",
+      today: periodStats, // key kept for the frontend; holds the SELECTED period's stats
       baseline: {
         avgKDA: baselineStats.avgKDA,
         avgCSPM: baselineStats.avgCSPM,
@@ -443,6 +477,9 @@ export async function learnOverviewHandler(req: Request): Promise<Response> {
       },
       strengths,
       weaknesses,
+      lpTrack,
+      deep,
+      spotlight,
     });
   } catch (err) {
     console.error("❌ learnOverview error:", err);
