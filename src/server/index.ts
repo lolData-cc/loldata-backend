@@ -178,6 +178,11 @@ startTierlistNightly();
 import { startApexCutoffSweep } from "./services/apexCutoffs";
 startApexCutoffSweep();
 
+// Record a status_history sample every 60s (powers the public /status page
+// uptime strips). The GET endpoints share the same 20s-cached checks.
+import { statusHandler, statusHistoryHandler, startStatusSweep } from "./routes/status";
+startStatusSweep();
+
 // Pre-warm the champion Build-tab cache (POST /api/champion/build). Cold it's a
 // 3-7s aggregation over participants; warm it's ~0.2s. The cache is in-process,
 // so without this every champion's first visitor after a deploy/6h-expiry ate
@@ -940,6 +945,14 @@ if (pathname === "/api/patch-notes" && req.method === "GET") {
 // :slug route below.
 if (pathname === "/api/pros" && req.method === "GET") {
   return withLogAndCors(req, pathname, prosDirectoryHandler);
+}
+
+// Public system status (the /status page). Exact matches.
+if (pathname === "/api/status" && req.method === "GET") {
+  return withLogAndCors(req, pathname, statusHandler);
+}
+if (pathname === "/api/status/history" && req.method === "GET") {
+  return withLogAndCors(req, pathname, statusHistoryHandler);
 }
 
 // Pro/streamer badge + identity reads (box + Cloud merged server-side) — the
