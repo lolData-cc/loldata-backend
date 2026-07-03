@@ -197,7 +197,8 @@ function computeStats(matches: any[], puuid: string) {
     const impact = computeImpact(me, info);
 
     perGame.push({
-      game: i + 1, kda: +kda.toFixed(2), win, champion: champ, role, impact,
+      game: i + 1, matchId: m.metadata?.matchId ?? null,
+      kda: +kda.toFixed(2), win, champion: champ, role, impact,
       kills: k, deaths: d, assists: a,
       cspm: durationMin > 0 ? +(cs / durationMin).toFixed(1) : 0,
       dmgShare: teamDmg > 0 ? +((dmg / teamDmg) * 100).toFixed(1) : 0,
