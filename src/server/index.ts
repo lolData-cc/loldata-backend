@@ -85,6 +85,7 @@ import { getChampionStatsHandler, getAvailablePatchesHandler, preloadSnapshots }
 import { analyzePlayerHandler, analyzeStatusHandler } from "./routes/analyzePlayer";
 import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlist";
 import { learnOverviewHandler } from "./routes/learn/overview";
+import { improvementTreeHandler } from "./routes/learn/improvementTree";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
 import { patchNotesHandler, patchLatestMapHandler, patchLatestChangesHandler } from "./routes/patchNotes";
 import { playerProfileHandler } from "./routes/playerProfile";
@@ -1009,6 +1010,10 @@ if (pathname === "/api/tierlist" && req.method === "GET") {
 // ── Learn endpoints ──
 if (pathname === "/api/learn/overview" && req.method === "POST") {
   return withLogAndCors(req, pathname, learnOverviewHandler);
+}
+
+if (pathname === "/api/learn/improvement-tree" && req.method === "POST") {
+  return withLogAndCors(req, pathname, improvementTreeHandler);
 }
 
 // webhook Stripe: niente CORS, ma puoi comunque loggare
