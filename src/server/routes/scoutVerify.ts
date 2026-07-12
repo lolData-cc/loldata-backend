@@ -11,10 +11,10 @@
 //   POST   /api/scout/lobby/:slug/admins
 //   DELETE /api/scout/lobby/:slug/admins/:profileId
 //
-// Admin checks rely on scout_lobby_admins (creator auto-inserted by
-// the SQL migration). All admin-only mutations require a Bearer token
-// resolved by getAuthUserId; the resolved user must have a row in
-// scout_lobby_admins for the target lobby.
+// Admin checks: the resolved Bearer user must either be the lobby's
+// owner_user_id (always an admin) OR have a row in scout_lobby_admins.
+// The create handler inserts the creator's admins row on lobby creation;
+// lobbies created before that fix are covered by the owner_user_id path.
 
 import { supabaseAdmin } from "../supabase/client";
 import { logger } from "../logger";
@@ -35,6 +35,17 @@ async function isLobbyAdmin(
   lobbySlug: string,
   profileId: string
 ): Promise<boolean> {
+  // The lobby owner is ALWAYS an admin, regardless of scout_lobby_admins.
+  // This is belt-and-suspenders: the create handler inserts a creator row,
+  // but if that row is ever missing (e.g. a lobby created before the fix)
+  // the owner must not be locked out of their own lobby's admin actions.
+  const { data: lobby } = await supabaseAdmin
+    .from("scout_lobbies")
+    .select("owner_user_id")
+    .eq("slug", lobbySlug)
+    .maybeSingle();
+  if (lobby?.owner_user_id && lobby.owner_user_id === profileId) return true;
+
   const { data, error } = await supabaseAdmin
     .from("scout_lobby_admins")
     .select("profile_id")

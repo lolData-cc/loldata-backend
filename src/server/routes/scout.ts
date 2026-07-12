@@ -289,6 +289,20 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
     }
   }
 
+  // Creator becomes the first lobby admin. This row is REQUIRED by the
+  // admin-gated endpoints (claim-invite, verify challenge, admins list)
+  // via isLobbyAdmin(), and is rendered as "Creator" in the edit dialog.
+  // Older lobbies got this row from the migration backfill; new lobbies
+  // must insert it here — there is no DB trigger. Non-fatal: owner_user_id
+  // still gates the edit FAB and isLobbyAdmin() also honours the owner.
+  {
+    const { error: adminErr } = await supabaseAdmin
+      .from("scout_lobby_admins")
+      .insert({ lobby_slug: slug, profile_id: userId, granted_by: null });
+    if (adminErr)
+      console.error("scout_lobby_admins (creator) insert error:", adminErr);
+  }
+
   // Fire ingestion + initial rank snapshot for every account in the lobby
   // (fire-and-forget). Ingestion ensures recent matches show up; snapshot
   // establishes the LP-gain baseline for the leaderboards.
