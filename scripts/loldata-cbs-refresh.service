@@ -1,0 +1,9 @@
+[Unit]
+Description=Rebuild champion build-stats summary tables + warm build_live cache
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/loldata-backend/scripts/refresh-cbs.sh
+TimeoutStartSec=7200
