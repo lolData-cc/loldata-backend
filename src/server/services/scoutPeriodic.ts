@@ -22,6 +22,7 @@
 import { supabaseAdmin } from "../supabase/client";
 import { writeRankSnapshot } from "./rankSnapshot";
 import { ensureDailyBounty } from "./scoutBounty";
+import { sweepScoutWebhooks } from "./scoutWebhookSweep";
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;     // 5 min cadence
 const PER_CALL_DELAY_MS = 250;                // ~4 calls/sec safety pace
@@ -135,6 +136,15 @@ async function sweepOnce(): Promise<void> {
   console.log(
     `[scout-periodic] sweep done: ${ok}/${total} ok, ${failed} failed in ${(elapsedMs / 1000).toFixed(1)}s`
   );
+
+  // Discord webhook delivery — polls for freshly finished games in lobbies
+  // that opted in, then posts the feed-style embed. Isolated in its own try
+  // so a webhook problem can never abort the snapshot sweep above.
+  try {
+    await sweepScoutWebhooks();
+  } catch (e) {
+    console.error("[scout-periodic] webhook sweep crashed:", e);
+  }
 }
 
 async function loop(): Promise<void> {

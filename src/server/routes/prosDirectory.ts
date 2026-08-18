@@ -17,9 +17,16 @@ const slugify = (s: string) =>
 // scoreboard/leaderboard nameplates — replaces the old browser→Supabase reads.
 export async function prosBadgeMapHandler(_req: Request): Promise<Response> {
   try {
-    const { pros, streamers } = await getBadgeData();
+    const { pros, streamers, proNames, streamerNames } = await getBadgeData();
     return Response.json(
-      { pros: [...pros], streamers: [...streamers] },
+      {
+        pros: [...pros],
+        streamers: [...streamers],
+        // nametag → { name, slug }. Lets a nameplate show WHO the pro is
+        // ("Faker") and link to their profile, without a call per player.
+        proNames: Object.fromEntries(proNames),
+        streamerNames: Object.fromEntries(streamerNames),
+      },
       { headers: { "Cache-Control": "public, max-age=600" } }
     );
   } catch (e: any) {

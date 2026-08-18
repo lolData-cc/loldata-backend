@@ -39,6 +39,13 @@ import { getSplitStatsHandler } from "./routes/split_stats";
 import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler, debugScoutSnapshotsHandler } from "./routes/scout";
 import { readScoutBountyTodayHandler, readScoutBountyLeaderboardHandler, previewScoutBountyHandler } from "./routes/scoutBountyRoutes";
 import {
+  listScoutWebhooksHandler,
+  createScoutWebhookHandler,
+  updateScoutWebhookHandler,
+  deleteScoutWebhookHandler,
+  testScoutWebhookHandler,
+} from "./routes/scoutWebhooks";
+import {
   createOrReadClaimInviteHandler,
   deleteClaimInviteHandler,
   readClaimInviteHandler,
@@ -869,6 +876,31 @@ if (pathname.startsWith("/api/scout/refresh/") && req.method === "POST") {
 
 if (pathname.startsWith("/api/scout/resolve-puuid/") && req.method === "GET") {
   return withLogAndCors(req, pathname, (r) => resolvePuuidHandler(r, pathname));
+}
+
+// ── Discord webhook integrations (lobby owner only) ────────────────────
+// /test is matched first: it is longer than the plain /<id> routes.
+if (
+  /^\/api\/scout\/webhooks\/[^/]+\/[^/]+\/test$/.test(pathname) &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => testScoutWebhookHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+$/.test(pathname) && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => listScoutWebhooksHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+$/.test(pathname) && req.method === "POST") {
+  return withLogAndCors(req, pathname, (r) => createScoutWebhookHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+\/[^/]+$/.test(pathname) && req.method === "PATCH") {
+  return withLogAndCors(req, pathname, (r) => updateScoutWebhookHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+\/[^/]+$/.test(pathname) && req.method === "DELETE") {
+  return withLogAndCors(req, pathname, (r) => deleteScoutWebhookHandler(r, pathname));
 }
 
 if (pathname === "/api/streamers/live" && req.method === "GET") {
