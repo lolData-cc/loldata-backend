@@ -21,7 +21,7 @@
 // Grade 2 is reached when EVERY scout_lobby_accounts row for the
 // player has verified_at set (computed by readScoutLobbyHandler).
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { logger } from "../logger";
 import { getSummonerByPuuid } from "../riot";
 
@@ -80,7 +80,7 @@ async function resolveAndAuth(
 
   // Pull the account row (region + verification state) joined with
   // the player so we can check claimed_by_profile_id in one query.
-  const { data: account, error } = await supabaseAdmin
+  const { data: account, error } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select(
       "id, lobby_player_id, puuid, region, verification_target_icon_id, verification_started_at, verified_at, scout_lobby_players!inner(id, claimed_by_profile_id)"
@@ -147,7 +147,7 @@ export async function startVerifyAccountHandler(
       // Not fatal — we can still issue a target, just don't dedupe.
     }
     targetIconId = pickTargetIcon(currentIconId);
-    const { error: updErr } = await supabaseAdmin
+    const { error: updErr } = await supabaseMatchAdmin
       .from("scout_lobby_accounts")
       .update({
         verification_target_icon_id: targetIconId,
@@ -222,7 +222,7 @@ export async function checkVerifyAccountHandler(
   }
 
   // Match — mark verified.
-  const { error: updErr } = await supabaseAdmin
+  const { error: updErr } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .update({ verified_at: new Date().toISOString() })
     .eq("id", account.id);

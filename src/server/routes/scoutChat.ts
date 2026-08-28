@@ -13,7 +13,7 @@
 //     verify_mode='disabled', anyone with a session can post — the
 //     lobby admin opted out of identity gating.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { logger } from "../logger";
 import { broadcastChatMessage } from "../realtime/scoutRealtime";
 
@@ -58,7 +58,7 @@ export async function readScoutChatHandler(
     Math.max(1, Number.isFinite(limitRaw) ? limitRaw : DEFAULT_LIMIT)
   );
 
-  let q = supabaseAdmin
+  let q = supabaseMatchAdmin
     .from("scout_lobby_messages")
     .select(
       "id, profile_id, lobby_player_id, display_name, color, content, created_at"
@@ -117,7 +117,7 @@ export async function postScoutChatHandler(
   // attributable to a claimed lobby member. (The previous
   // verify_mode='disabled' bypass that allowed signed-in non-members
   // to post as "Anonymous" is removed.)
-  const { data: claimedPlayer } = await supabaseAdmin
+  const { data: claimedPlayer } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select("id, display_name, color")
     .eq("lobby_slug", slug)
@@ -135,7 +135,7 @@ export async function postScoutChatHandler(
   const color = claimedPlayer.color ?? null;
   const lobbyPlayerId = claimedPlayer.id;
 
-  const { data: inserted, error: insErr } = await supabaseAdmin
+  const { data: inserted, error: insErr } = await supabaseMatchAdmin
     .from("scout_lobby_messages")
     .insert({
       lobby_slug: slug,

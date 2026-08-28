@@ -84,7 +84,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
       .ilike("game_name", `${searchName}%`)
       .order("lp", { ascending: false, nullsFirst: false })
       .limit(8),
-    supabaseAdmin
+    supabaseMatchAdmin
       .from("scout_lobby_accounts")
       .select("riot_name, riot_tag, region")
       .ilike("riot_name", `${searchName}%`)
@@ -120,7 +120,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
         .ilike("game_name", `%${searchName}%`)
         .order("lp", { ascending: false, nullsFirst: false })
         .limit(8),
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("scout_lobby_accounts")
         .select("riot_name, riot_tag, region")
         .ilike("riot_name", `%${searchName}%`)
