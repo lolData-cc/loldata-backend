@@ -3,7 +3,7 @@
 // after each match ingestion + on lobby create/update for baselining.
 
 import { getRankedDataBySummonerId } from "../riot";
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 
 const QUEUE_SOLO = "RANKED_SOLO_5x5";
 const QUEUE_FLEX = "RANKED_FLEX_SR";
@@ -106,7 +106,7 @@ export async function computeLpDeltas(
   // Most-RECENT 5000 (DESC + reverse to chronological). An active tracked
   // account can have thousands of snapshots; an ASC limit would return the
   // OLDEST and miss the ones bracketing today's games → lpDelta always null.
-  const { data } = await supabaseAdmin
+  const { data } = await supabaseMatchAdmin
     .from("scout_rank_snapshots")
     .select("queue_type, tier, rank_division, lp, taken_at, match_id")
     .eq("puuid", puuid)
@@ -198,7 +198,7 @@ export async function writeRankSnapshot(
   // the (wasted) Riot fetch on every call — which is what stormed league-v4
   // when many scout lobby reads / the periodic sweep hit the same accounts.
   {
-    const { data: recent } = await supabaseAdmin
+    const { data: recent } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("taken_at")
       .eq("puuid", puuid)
@@ -249,7 +249,7 @@ export async function writeRankSnapshot(
     if (!tier) continue;
 
     // Dedupe — skip if a row identical to this one was taken recently.
-    const { data: lastRow } = await supabaseAdmin
+    const { data: lastRow } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("tier, rank_division, lp, taken_at")
       .eq("puuid", puuid)
@@ -287,7 +287,7 @@ export async function writeRankSnapshot(
       );
     }
 
-    const { error } = await supabaseAdmin.from("scout_rank_snapshots").insert({
+    const { error } = await supabaseMatchAdmin.from("scout_rank_snapshots").insert({
       puuid,
       region: region.toUpperCase(),
       queue_type: queueType,
@@ -340,7 +340,7 @@ export async function isPuuidInAnyLobby(puuid: string): Promise<boolean> {
   if (cached && Date.now() - cached.ts < PUUID_LOBBY_TTL) {
     return cached.value;
   }
-  const { data } = await supabaseAdmin
+  const { data } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select("id")
     .eq("puuid", puuid)

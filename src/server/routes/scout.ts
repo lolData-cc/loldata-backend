@@ -2,7 +2,7 @@
 // Scout / Feed lobbies — shareable groups of up to 20 players (each with
 // up to 3 Riot accounts). Public read by slug, owner-key gated writes.
 
-import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // scout_* → Cloud, participants → box (hybrid)
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // scout_* + users + participants → box; only profiles/auth stay on Cloud
 import { ingestQuickThenBackground } from "../services/matchIngest";
 import { writeRankSnapshot, ladderScore, invalidatePuuidLobbyCache, isPuuidInAnyLobby } from "../services/rankSnapshot";
 import {
@@ -49,7 +49,7 @@ async function getLobbyQuota(userId: string): Promise<{
     .maybeSingle();
   const plan = normalizePlan(profile?.plan ?? null);
 
-  const { count } = await supabaseAdmin
+  const { count } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("slug", { count: "exact", head: true })
     .eq("owner_user_id", userId);
@@ -76,7 +76,7 @@ async function generateUniqueSlug(): Promise<string> {
   // up to a few times just in case.
   for (let attempt = 0; attempt < 8; attempt++) {
     const slug = randomId(SLUG_ALPHABET, SLUG_LENGTH);
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await supabaseMatchAdmin
       .from("scout_lobbies")
       .select("slug")
       .eq("slug", slug)
@@ -227,7 +227,7 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
   const ownerKey = randomId(OWNER_KEY_ALPHABET, OWNER_KEY_LENGTH);
 
   // Insert lobby row
-  const { error: lobbyErr } = await supabaseAdmin.from("scout_lobbies").insert({
+  const { error: lobbyErr } = await supabaseMatchAdmin.from("scout_lobbies").insert({
     slug,
     name,
     owner_key: ownerKey,
@@ -250,7 +250,7 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
   // Insert players + accounts
   for (let pIdx = 0; pIdx < players.length; pIdx++) {
     const p = players[pIdx];
-    const { data: playerRow, error: playerErr } = await supabaseAdmin
+    const { data: playerRow, error: playerErr } = await supabaseMatchAdmin
       .from("scout_lobby_players")
       .insert({
         lobby_slug: slug,
@@ -264,7 +264,7 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
     if (playerErr || !playerRow) {
       console.error("scout_lobby_players insert error:", playerErr);
       // Rollback by deleting the lobby (CASCADE removes children).
-      await supabaseAdmin.from("scout_lobbies").delete().eq("slug", slug);
+      await supabaseMatchAdmin.from("scout_lobbies").delete().eq("slug", slug);
       return Response.json({ error: "Failed to create player" }, { status: 500 });
     }
 
@@ -278,15 +278,29 @@ export async function createScoutLobbyHandler(req: Request): Promise<Response> {
       order_index: aIdx,
     }));
 
-    const { error: accErr } = await supabaseAdmin
+    const { error: accErr } = await supabaseMatchAdmin
       .from("scout_lobby_accounts")
       .insert(accountRows);
 
     if (accErr) {
       console.error("scout_lobby_accounts insert error:", accErr);
-      await supabaseAdmin.from("scout_lobbies").delete().eq("slug", slug);
+      await supabaseMatchAdmin.from("scout_lobbies").delete().eq("slug", slug);
       return Response.json({ error: "Failed to create accounts" }, { status: 500 });
     }
+  }
+
+  // Creator becomes the first lobby admin. This row is REQUIRED by the
+  // admin-gated endpoints (claim-invite, verify challenge, admins list)
+  // via isLobbyAdmin(), and is rendered as "Creator" in the edit dialog.
+  // Older lobbies got this row from the migration backfill; new lobbies
+  // must insert it here — there is no DB trigger. Non-fatal: owner_user_id
+  // still gates the edit FAB and isLobbyAdmin() also honours the owner.
+  {
+    const { error: adminErr } = await supabaseMatchAdmin
+      .from("scout_lobby_admins")
+      .insert({ lobby_slug: slug, profile_id: userId, granted_by: null });
+    if (adminErr)
+      console.error("scout_lobby_admins (creator) insert error:", adminErr);
   }
 
   // Fire ingestion + initial rank snapshot for every account in the lobby
@@ -326,7 +340,7 @@ export async function readMyScoutLobbiesHandler(
   const quota = await getLobbyQuota(userId);
 
   // Fetch lobbies + a count of unique players per lobby (for the card preview).
-  const { data: lobbies, error } = await supabaseAdmin
+  const { data: lobbies, error } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select(
       "slug, name, created_at, last_active_at, last_refresh_at, is_public, scout_lobby_players(id)"
@@ -421,7 +435,7 @@ export async function readScoutLiveHandler(
   if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
 
   // 1. Lobby accounts + player metadata.
-  const { data: playerRows, error: playerErr } = await supabaseAdmin
+  const { data: playerRows, error: playerErr } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "id, display_name, color, order_index, scout_lobby_accounts(puuid, region, riot_name, riot_tag, is_primary, order_index)"
@@ -511,7 +525,7 @@ export async function readScoutLiveHandler(
   {
     const primaries = Array.from(new Set(probes.map((p) => p.primaryPuuid)));
     if (primaries.length > 0) {
-      const { data: iconRows } = await supabaseAdmin
+      const { data: iconRows } = await supabaseMatchAdmin
         .from("users")
         .select("puuid, icon_id")
         .in("puuid", primaries);
@@ -665,7 +679,7 @@ export async function resolvePuuidHandler(
   }
 
   // 2. users table fallback
-  const { data: userRow } = await supabaseAdmin
+  const { data: userRow } = await supabaseMatchAdmin
     .from("users")
     .select("name, tag, region")
     .eq("puuid", puuid)
@@ -716,7 +730,7 @@ async function resolveLobbyPuuids(slug: string): Promise<{
   >;
   allPlayers: Array<{ id: string; displayName: string; color: string | null }>;
 }> {
-  const { data: players, error } = await supabaseAdmin
+  const { data: players, error } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "id, display_name, color, scout_lobby_accounts(puuid, is_primary)"
@@ -1015,7 +1029,7 @@ export async function readScoutChampionsHandler(
 
   // Always clamp to lobby creation so champions counted in the lobby's
   // history don't include matches that predate the lobby itself.
-  const { data: lobbyMeta } = await supabaseAdmin
+  const { data: lobbyMeta } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("created_at")
     .eq("slug", slug)
@@ -1424,7 +1438,7 @@ export async function readScoutTrendingHandler(
   if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
 
   // Lobby creation cutoff.
-  const { data: lobby } = await supabaseAdmin
+  const { data: lobby } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("created_at")
     .eq("slug", slug)
@@ -1436,7 +1450,7 @@ export async function readScoutTrendingHandler(
   const sinceTs = new Date(lobby.created_at).getTime();
 
   // Lobby players + their accounts.
-  const { data: playerRows } = await supabaseAdmin
+  const { data: playerRows } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "id, display_name, color, scout_lobby_accounts(puuid, is_primary)"
@@ -2017,7 +2031,7 @@ export async function readScoutLpTimelineHandler(
       : "day";
 
   // 1. Lobby + players + accounts
-  const { data: lobby } = await supabaseAdmin
+  const { data: lobby } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("created_at")
     .eq("slug", slug)
@@ -2027,7 +2041,7 @@ export async function readScoutLpTimelineHandler(
   }
   const sinceTs = new Date(lobby.created_at).getTime();
 
-  const { data: playerRows } = await supabaseAdmin
+  const { data: playerRows } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "id, display_name, color, order_index, scout_lobby_accounts(puuid, is_primary, region, riot_name, riot_tag, order_index)"
@@ -2071,7 +2085,7 @@ export async function readScoutLpTimelineHandler(
   // Icon lookup for every account so chips can show avatars.
   const iconByPuuid = new Map<string, number | null>();
   {
-    const { data: iconRows } = await supabaseAdmin
+    const { data: iconRows } = await supabaseMatchAdmin
       .from("users")
       .select("puuid, icon_id")
       .in("puuid", allPuuids);
@@ -2113,7 +2127,7 @@ export async function readScoutLpTimelineHandler(
     for (let page = 0; page < MAX_PAGES; page++) {
       const from = page * PAGE;
       const to = from + PAGE - 1;
-      const { data, error } = await supabaseAdmin
+      const { data, error } = await supabaseMatchAdmin
         .from("scout_rank_snapshots")
         .select("puuid, tier, rank_division, lp, taken_at")
         .eq("puuid", puuid)
@@ -2262,7 +2276,7 @@ export async function readScoutLeaderboardHandler(
   const sinceParam = url.searchParams.get("since");
   const windowIso = sinceParam ?? windowStartIso(windowParam);
 
-  const { data: lobbyMeta } = await supabaseAdmin
+  const { data: lobbyMeta } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("created_at")
     .eq("slug", slug)
@@ -2278,7 +2292,7 @@ export async function readScoutLeaderboardHandler(
       : (windowIso ?? lobbyCreatedIso);
 
   // 1. Resolve all (player → accounts) — one row per account in the lobby.
-  const { data: players, error: playersErr } = await supabaseAdmin
+  const { data: players, error: playersErr } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "id, display_name, color, scout_lobby_accounts(puuid, is_primary, region, riot_name, riot_tag)"
@@ -2331,7 +2345,7 @@ export async function readScoutLeaderboardHandler(
   // 2. Icon lookup per account (users.icon_id).
   const iconByPuuid = new Map<string, number | null>();
   {
-    const { data: iconRows } = await supabaseAdmin
+    const { data: iconRows } = await supabaseMatchAdmin
       .from("users")
       .select("puuid, icon_id")
       .in("puuid", allPuuids);
@@ -2474,7 +2488,7 @@ export async function readScoutLeaderboardHandler(
     await Promise.all(
       allPuuids.map(async (puuid) => {
         // Newest snapshot overall (for current rank display + window last).
-        const { data: newestRows } = await supabaseAdmin
+        const { data: newestRows } = await supabaseMatchAdmin
           .from("scout_rank_snapshots")
           .select("tier, rank_division, lp, wins, losses, taken_at")
           .eq("puuid", puuid)
@@ -2493,7 +2507,7 @@ export async function readScoutLeaderboardHandler(
         }
 
         // Oldest snapshot in window — the leaderboard "baseline".
-        let oldestQ = supabaseAdmin
+        let oldestQ = supabaseMatchAdmin
           .from("scout_rank_snapshots")
           .select("tier, rank_division, lp, taken_at")
           .eq("puuid", puuid)
@@ -2904,7 +2918,7 @@ export async function readScoutFeedHandler(
   // get an empty feed (the frontend shows a locked body anyway, but
   // this prevents reading the data via a direct API call).
   {
-    const { data: lobbyMeta } = await supabaseAdmin
+    const { data: lobbyMeta } = await supabaseMatchAdmin
       .from("scout_lobbies")
       .select("is_public, owner_user_id")
       .eq("slug", slug)
@@ -2914,13 +2928,13 @@ export async function readScoutFeedHandler(
       const viewerId = await getAuthUserId(req);
       if (viewerId) {
         const [{ data: claimed }, { data: admin }] = await Promise.all([
-          supabaseAdmin
+          supabaseMatchAdmin
             .from("scout_lobby_players")
             .select("id")
             .eq("lobby_slug", slug)
             .eq("claimed_by_profile_id", viewerId)
             .maybeSingle(),
-          supabaseAdmin
+          supabaseMatchAdmin
             .from("scout_lobby_admins")
             .select("profile_id")
             .eq("lobby_slug", slug)
@@ -2954,7 +2968,7 @@ export async function readScoutFeedHandler(
   // 1. Resolve lobby accounts → puuid + region map.
   //    Also pull claim/verify columns so the feed can decorate player
   //    names with the green Meta-style verify badge.
-  const { data: accounts, error: accErr } = await supabaseAdmin
+  const { data: accounts, error: accErr } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select(
       "puuid, region, lobby_player_id, verified_at, scout_lobby_players!inner(id, display_name, color, lobby_slug, claimed_by_profile_id, show_verify_badge)"
@@ -2970,7 +2984,7 @@ export async function readScoutFeedHandler(
   }
 
   // Verify mode clamp — same policy as readScoutLobbyHandler.
-  const { data: lobbyRow } = await supabaseAdmin
+  const { data: lobbyRow } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("verify_mode")
     .eq("slug", slug)
@@ -3334,7 +3348,7 @@ export async function readScoutFeedHandler(
       for (let page = 0; page < MAX_PAGES; page++) {
         const from = page * PAGE;
         const to = from + PAGE - 1;
-        const { data, error } = await supabaseAdmin
+        const { data, error } = await supabaseMatchAdmin
           .from("scout_rank_snapshots")
           .select(
             "puuid, queue_type, tier, rank_division, lp, taken_at, match_id"
@@ -3458,7 +3472,7 @@ export async function deleteScoutLobbyHandler(
   const url = new URL(req.url);
   const providedKey = url.searchParams.get("key");
 
-  const { data: lobby, error: lobbyErr } = await supabaseAdmin
+  const { data: lobby, error: lobbyErr } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("slug, owner_key, owner_user_id")
     .eq("slug", slug)
@@ -3474,7 +3488,7 @@ export async function deleteScoutLobbyHandler(
     return Response.json({ error: "Not authorized" }, { status: 403 });
   }
 
-  const { error: delErr } = await supabaseAdmin
+  const { error: delErr } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .delete()
     .eq("slug", slug);
@@ -3501,7 +3515,7 @@ export async function updateScoutLobbyHandler(
   const url = new URL(req.url);
   const providedKey = url.searchParams.get("key");
 
-  const { data: lobby, error: lobbyErr } = await supabaseAdmin
+  const { data: lobby, error: lobbyErr } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("slug, owner_key, owner_user_id, name")
     .eq("slug", slug)
@@ -3588,7 +3602,7 @@ export async function updateScoutLobbyHandler(
       lobbyUpdate.verify_mode = vm;
     }
   }
-  await supabaseAdmin
+  await supabaseMatchAdmin
     .from("scout_lobbies")
     .update(lobbyUpdate)
     .eq("slug", slug);
@@ -3614,7 +3628,7 @@ export async function updateScoutLobbyHandler(
   // claim/verify rows survive because we never delete the parent
   // player or its accounts unless they're explicitly removed.
 
-  const { data: existingPlayers } = await supabaseAdmin
+  const { data: existingPlayers } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select("id, display_name, color, order_index")
     .eq("lobby_slug", slug);
@@ -3633,7 +3647,7 @@ export async function updateScoutLobbyHandler(
     let playerId: string;
     if (incomingId && existingPlayerIds.has(incomingId)) {
       // UPDATE in place — preserves claim/verify state.
-      const { error: upErr } = await supabaseAdmin
+      const { error: upErr } = await supabaseMatchAdmin
         .from("scout_lobby_players")
         .update({
           display_name: p.displayName.trim(),
@@ -3648,7 +3662,7 @@ export async function updateScoutLobbyHandler(
       playerId = incomingId;
     } else {
       // Brand new row.
-      const { data: row, error: insErr } = await supabaseAdmin
+      const { data: row, error: insErr } = await supabaseMatchAdmin
         .from("scout_lobby_players")
         .insert({
           lobby_slug: slug,
@@ -3675,7 +3689,7 @@ export async function updateScoutLobbyHandler(
     (id) => !incomingIds.has(id)
   );
   if (idsToDelete.length > 0) {
-    await supabaseAdmin
+    await supabaseMatchAdmin
       .from("scout_lobby_players")
       .delete()
       .in("id", idsToDelete);
@@ -3688,7 +3702,7 @@ export async function updateScoutLobbyHandler(
     const p = players[pIdx];
     const playerId = resolvedPlayerIds[pIdx];
 
-    const { data: existingAccounts } = await supabaseAdmin
+    const { data: existingAccounts } = await supabaseMatchAdmin
       .from("scout_lobby_accounts")
       .select("id, puuid")
       .eq("lobby_player_id", playerId);
@@ -3711,7 +3725,7 @@ export async function updateScoutLobbyHandler(
         order_index: aIdx,
       };
       if (existingId) {
-        const { error: upErr } = await supabaseAdmin
+        const { error: upErr } = await supabaseMatchAdmin
           .from("scout_lobby_accounts")
           .update(payload)
           .eq("id", existingId);
@@ -3720,7 +3734,7 @@ export async function updateScoutLobbyHandler(
           return Response.json({ error: "Failed to update accounts" }, { status: 500 });
         }
       } else {
-        const { error: insErr } = await supabaseAdmin
+        const { error: insErr } = await supabaseMatchAdmin
           .from("scout_lobby_accounts")
           .insert(payload);
         if (insErr) {
@@ -3736,7 +3750,7 @@ export async function updateScoutLobbyHandler(
       if (!keepPuuids.has(puuid)) accountIdsToDelete.push(id);
     }
     if (accountIdsToDelete.length > 0) {
-      await supabaseAdmin
+      await supabaseMatchAdmin
         .from("scout_lobby_accounts")
         .delete()
         .in("id", accountIdsToDelete);
@@ -3782,7 +3796,7 @@ export async function refreshScoutLobbyHandler(
   if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
 
   // 1. Verify lobby exists.
-  const { data: lobbyRow, error: lobbyErr } = await supabaseAdmin
+  const { data: lobbyRow, error: lobbyErr } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("slug")
     .eq("slug", slug)
@@ -3792,7 +3806,7 @@ export async function refreshScoutLobbyHandler(
   }
 
   // 2. Resolve all account puuids+region for ingestion.
-  const { data: accounts, error: accErr } = await supabaseAdmin
+  const { data: accounts, error: accErr } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select("puuid, region, scout_lobby_players!inner(lobby_slug)")
     .eq("scout_lobby_players.lobby_slug", slug);
@@ -3885,7 +3899,7 @@ export async function refreshScoutLobbyHandler(
   );
 
   const newTs = new Date().toISOString();
-  const { error: updErr } = await supabaseAdmin
+  const { error: updErr } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .update({ last_refresh_at: newTs })
     .eq("slug", slug);
@@ -3936,7 +3950,7 @@ export async function readScoutLobbyHandler(
   const slug = pathname.split("/").pop();
   if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
 
-  const { data: lobby, error: lobbyErr } = await supabaseAdmin
+  const { data: lobby, error: lobbyErr } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select(
       "slug, name, is_public, created_at, last_active_at, last_refresh_at, owner_user_id, hero_champion, enabled_tabs, verify_mode"
@@ -3961,13 +3975,13 @@ export async function readScoutLobbyHandler(
     const viewerId = await getAuthUserId(req);
     if (viewerId) {
       const [{ data: claimed }, { data: admin }] = await Promise.all([
-        supabaseAdmin
+        supabaseMatchAdmin
           .from("scout_lobby_players")
           .select("id")
           .eq("lobby_slug", slug)
           .eq("claimed_by_profile_id", viewerId)
           .maybeSingle(),
-        supabaseAdmin
+        supabaseMatchAdmin
           .from("scout_lobby_admins")
           .select("profile_id")
           .eq("lobby_slug", slug)
@@ -4000,7 +4014,7 @@ export async function readScoutLobbyHandler(
     });
   }
 
-  const { data: players, error: playersErr } = await supabaseAdmin
+  const { data: players, error: playersErr } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "id, display_name, color, order_index, claimed_by_profile_id, claimed_at, show_verify_badge, scout_lobby_accounts(id, puuid, region, riot_name, riot_tag, is_primary, order_index, verified_at)"
@@ -4076,7 +4090,7 @@ export async function readScoutLobbyHandler(
 
   let iconByPuuid = new Map<string, number | null>();
   if (primaryPuuids.length > 0) {
-    const { data: iconRows } = await supabaseAdmin
+    const { data: iconRows } = await supabaseMatchAdmin
       .from("users")
       .select("puuid, icon_id")
       .in("puuid", primaryPuuids);
@@ -4134,7 +4148,7 @@ export async function readScoutLobbyHandler(
   if (!usedRankRpc) {
     await Promise.all(
       allAccountPuuids.map(async (puuid) => {
-        const { data: rows } = await supabaseAdmin
+        const { data: rows } = await supabaseMatchAdmin
           .from("scout_rank_snapshots")
           .select("tier, rank_division, lp")
           .eq("puuid", puuid)
@@ -4161,7 +4175,7 @@ export async function readScoutLobbyHandler(
   }));
 
   // Bump last_active_at (fire-and-forget)
-  supabaseAdmin
+  supabaseMatchAdmin
     .from("scout_lobbies")
     .update({ last_active_at: new Date().toISOString() })
     .eq("slug", slug)
@@ -4187,7 +4201,7 @@ export async function readScoutLobbyHandler(
 
   // Lobby admins — creator + co-admins. The frontend uses this to
   // gate the Edit dialog visibility and the Verify FAB visibility.
-  const { data: adminRows } = await supabaseAdmin
+  const { data: adminRows } = await supabaseMatchAdmin
     .from("scout_lobby_admins")
     .select("profile_id, granted_at, granted_by")
     .eq("lobby_slug", slug);
@@ -4240,7 +4254,7 @@ export async function debugScoutSnapshotsHandler(
   const slug = pathname.split("/").pop();
   if (!slug) return Response.json({ error: "Missing slug" }, { status: 400 });
 
-  const { data: lobby } = await supabaseAdmin
+  const { data: lobby } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("created_at")
     .eq("slug", slug)
@@ -4251,7 +4265,7 @@ export async function debugScoutSnapshotsHandler(
 
   // scout_lobby_accounts is keyed by player_id, NOT lobby_slug — so we
   // resolve via the join: lobby_slug → players[].id → accounts[].
-  const { data: playerRows } = await supabaseAdmin
+  const { data: playerRows } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "scout_lobby_accounts(puuid, region, riot_name, riot_tag, is_primary)"
@@ -4284,12 +4298,12 @@ export async function debugScoutSnapshotsHandler(
   for (const a of accounts as Array<{ puuid: string; region: string; riot_name: string; riot_tag: string }>) {
     const inLobby = await isPuuidInAnyLobby(a.puuid);
 
-    const { count: totalCount } = await supabaseAdmin
+    const { count: totalCount } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("id", { count: "exact", head: true })
       .eq("puuid", a.puuid);
 
-    const { count: windowCount } = await supabaseAdmin
+    const { count: windowCount } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("id", { count: "exact", head: true })
       .eq("puuid", a.puuid)
@@ -4297,7 +4311,7 @@ export async function debugScoutSnapshotsHandler(
 
     // Oldest snapshot in window (solo queue) — drives the baseline
     // the leaderboard computes balance against.
-    const { data: oldestRows } = await supabaseAdmin
+    const { data: oldestRows } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("taken_at, tier, rank_division, lp")
       .eq("puuid", a.puuid)
@@ -4309,7 +4323,7 @@ export async function debugScoutSnapshotsHandler(
 
     // Newest snapshot (solo queue) — what the leaderboard compares
     // against the baseline.
-    const { data: newestRows } = await supabaseAdmin
+    const { data: newestRows } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("taken_at, tier, rank_division, lp")
       .eq("puuid", a.puuid)
@@ -4320,7 +4334,7 @@ export async function debugScoutSnapshotsHandler(
 
     // Number of DISTINCT (tier, division, lp) tuples in window — if
     // it's 1, the leaderboard balance will be 0 by definition.
-    const { data: distinctRows } = await supabaseAdmin
+    const { data: distinctRows } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("tier, rank_division, lp")
       .eq("puuid", a.puuid)
@@ -4336,7 +4350,7 @@ export async function debugScoutSnapshotsHandler(
           ladderScore(oldestSolo.tier, oldestSolo.rank_division, Number(oldestSolo.lp ?? 0))
         : 0;
 
-    const { data: latest } = await supabaseAdmin
+    const { data: latest } = await supabaseMatchAdmin
       .from("scout_rank_snapshots")
       .select("taken_at, tier, rank_division, lp, queue_type")
       .eq("puuid", a.puuid)

@@ -1,5 +1,5 @@
 // routes/getTotalMastery.ts
-import { supabase } from "../supabase/client";
+import { supabase, supabaseMatch } from "../supabase/client";
 
 const regionRouting: Record<string, { account: string; platform: string }> = {
   EUW: { account: "europe.api.riotgames.com", platform: "euw1.api.riotgames.com" },
@@ -76,7 +76,7 @@ export async function getTotalMasteryHandler(req: Request): Promise<Response> {
 
     // opzionale: salva su Supabase (se ti serve)
     // (ti lascio un esempio minimale, adattalo alle tue tabelle/colonne)
-    // await supabase.from("users").update({ total_mastery_points: totalPoints }).eq("puuid", account.puuid)
+    // await supabaseMatch.from("users").update({ total_mastery_points: totalPoints }).eq("puuid", account.puuid)
 
     return Response.json({
       puuid: account.puuid,

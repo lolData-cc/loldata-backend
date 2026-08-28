@@ -19,9 +19,10 @@
 // match-v5 data on every render via the Riot-direct path. Snapshots
 // are the only piece the cron needs to babysit.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { writeRankSnapshot } from "./rankSnapshot";
 import { ensureDailyBounty } from "./scoutBounty";
+import { sweepScoutWebhooks } from "./scoutWebhookSweep";
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;     // 5 min cadence
 const PER_CALL_DELAY_MS = 250;                // ~4 calls/sec safety pace
@@ -32,7 +33,7 @@ let started = false;
 async function sweepOnce(): Promise<void> {
   const startedAt = Date.now();
 
-  const { data: rows, error } = await supabaseAdmin
+  const { data: rows, error } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select("puuid, region");
 
@@ -103,7 +104,7 @@ async function sweepOnce(): Promise<void> {
   // idempotent: a fast-path SELECT on the days the row already exists.
   try {
     const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString();
-    const { data: lobbies } = await supabaseAdmin
+    const { data: lobbies } = await supabaseMatchAdmin
       .from("scout_lobbies")
       .select("slug, last_active_at")
       .gte("last_active_at", sevenDaysAgo);
@@ -135,6 +136,15 @@ async function sweepOnce(): Promise<void> {
   console.log(
     `[scout-periodic] sweep done: ${ok}/${total} ok, ${failed} failed in ${(elapsedMs / 1000).toFixed(1)}s`
   );
+
+  // Discord webhook delivery — polls for freshly finished games in lobbies
+  // that opted in, then posts the feed-style embed. Isolated in its own try
+  // so a webhook problem can never abort the snapshot sweep above.
+  try {
+    await sweepScoutWebhooks();
+  } catch (e) {
+    console.error("[scout-periodic] webhook sweep crashed:", e);
+  }
 }
 
 async function loop(): Promise<void> {

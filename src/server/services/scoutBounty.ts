@@ -15,7 +15,7 @@
 //      value) in the sidebar, and aggregates all-time claims into
 //      a leaderboard at the bottom of the Leaderboard tab.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { logger } from "../logger";
 import { broadcastBountyEvent } from "../realtime/scoutRealtime";
 
@@ -114,7 +114,7 @@ async function getAllTemplates(): Promise<BountyTemplate[]> {
   if (templateCache && Date.now() - templateCacheAt < TEMPLATE_TTL_MS) {
     return templateCache;
   }
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_bounty_templates")
     .select("*");
   if (error) {
@@ -159,7 +159,7 @@ export async function ensureDailyBounty(
   const today = todayLocalDateString();
 
   // Fast path: row already exists for today.
-  const { data: existing, error: readErr } = await supabaseAdmin
+  const { data: existing, error: readErr } = await supabaseMatchAdmin
     .from("scout_bounty_daily")
     .select("*")
     .eq("lobby_slug", lobbySlug)
@@ -177,7 +177,7 @@ export async function ensureDailyBounty(
   // Need to mint. Pick a random template weighted by rarity, excluding the
   // ones used on this lobby's most recent days so it doesn't repeat.
   const templates = await getAllTemplates();
-  const { data: recentRows } = await supabaseAdmin
+  const { data: recentRows } = await supabaseMatchAdmin
     .from("scout_bounty_daily")
     .select("template_id")
     .eq("lobby_slug", lobbySlug)
@@ -195,7 +195,7 @@ export async function ensureDailyBounty(
   // INSERT with ON CONFLICT DO NOTHING semantics via the UNIQUE
   // constraint on (lobby_slug, day_utc) — if a race insert happened
   // between our SELECT and INSERT we re-read whoever won.
-  const { data: inserted, error: insertErr } = await supabaseAdmin
+  const { data: inserted, error: insertErr } = await supabaseMatchAdmin
     .from("scout_bounty_daily")
     .insert({
       lobby_slug: lobbySlug,
@@ -211,7 +211,7 @@ export async function ensureDailyBounty(
 
   // Race: someone else inserted. Re-read.
   if (insertErr) {
-    const { data: row } = await supabaseAdmin
+    const { data: row } = await supabaseMatchAdmin
       .from("scout_bounty_daily")
       .select("*")
       .eq("lobby_slug", lobbySlug)
@@ -329,7 +329,7 @@ export async function checkBountyForMatch(
   const claimedLobbies: string[] = [];
 
   // Find every lobby this puuid plays in via scout_lobby_accounts.
-  const { data: memberships, error: memErr } = await supabaseAdmin
+  const { data: memberships, error: memErr } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select("puuid, lobby_player_id, scout_lobby_players ( lobby_slug, id )")
     .eq("puuid", participant.puuid);
@@ -352,7 +352,7 @@ export async function checkBountyForMatch(
 
   for (const mem of mems) {
     const today = todayLocalDateString();
-    const { data: bounty } = await supabaseAdmin
+    const { data: bounty } = await supabaseMatchAdmin
       .from("scout_bounty_daily")
       .select("id, template_id, claimed_at, claimed_value")
       .eq("lobby_slug", mem.lobby_slug)
@@ -380,7 +380,7 @@ export async function checkBountyForMatch(
     const cmp = lowerIsBetter ? "gt" : "lt"; // current value is WORSE when …
     const orFilter = `claimed_at.is.null,claimed_value.${cmp}.${value}`;
 
-    const { data: updated, error: updErr } = await supabaseAdmin
+    const { data: updated, error: updErr } = await supabaseMatchAdmin
       .from("scout_bounty_daily")
       .update({
         claimed_at: new Date().toISOString(),
@@ -407,7 +407,7 @@ export async function checkBountyForMatch(
       // broadcast to everyone watching the lobby. Best-effort: failures
       // here must never break ingestion.
       try {
-        const { data: lp } = await supabaseAdmin
+        const { data: lp } = await supabaseMatchAdmin
           .from("scout_lobby_players")
           .select("display_name, color")
           .eq("id", mem.lobby_player_id)
@@ -468,7 +468,7 @@ export async function reconcileDailyBounty(
   reconcileThrottle.set(lobbySlug, Date.now());
 
   // 1. lobby account puuids → lobby_player_id
-  const { data: accs } = await supabaseAdmin
+  const { data: accs } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select("puuid, lobby_player_id, scout_lobby_players!inner ( lobby_slug )")
     .eq("scout_lobby_players.lobby_slug", lobbySlug);
@@ -486,7 +486,7 @@ export async function reconcileDailyBounty(
   // 2. today's ingested matches for these accounts. Pull a generous 36h
   //    window, then filter precisely to the bounty's Rome day.
   const sinceIso = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
-  const { data: rows } = await supabaseAdmin
+  const { data: rows } = await supabaseMatchAdmin
     .from("participants")
     .select(
       "puuid, match_id, kills, deaths, assists, gold_earned, total_damage_to_champions, vision_score, kill_participation, total_cs, total_minions_killed, neutral_minions_killed, win, matches!inner ( game_creation, game_duration_seconds, queue_id )"
@@ -554,7 +554,7 @@ export async function reconcileDailyBounty(
   // 4. atomic competitive claim — identical guard to the live path.
   const cmp = lowerIsBetter ? "gt" : "lt";
   const orFilter = `claimed_at.is.null,claimed_value.${cmp}.${best.value}`;
-  const { data: updated } = await supabaseAdmin
+  const { data: updated } = await supabaseMatchAdmin
     .from("scout_bounty_daily")
     .update({
       claimed_at: new Date().toISOString(),
@@ -575,7 +575,7 @@ export async function reconcileDailyBounty(
 
     // Announce the (retroactive) claim in chat, same as the live path.
     try {
-      const { data: lp } = await supabaseAdmin
+      const { data: lp } = await supabaseMatchAdmin
         .from("scout_lobby_players")
         .select("display_name, color")
         .eq("id", best.lobby_player_id)
@@ -617,7 +617,7 @@ export async function readTodayBountyPayload(lobbySlug: string) {
     try {
       const changed = await reconcileDailyBounty(lobbySlug, bounty, template);
       if (changed) {
-        const { data: refreshed } = await supabaseAdmin
+        const { data: refreshed } = await supabaseMatchAdmin
           .from("scout_bounty_daily")
           .select("*")
           .eq("id", bounty.id)
@@ -639,7 +639,7 @@ export async function readTodayBountyPayload(lobbySlug: string) {
     color: string | null;
   } | null = null;
   if (bounty.claimed_by_lobby_player_id) {
-    const { data: lp } = await supabaseAdmin
+    const { data: lp } = await supabaseMatchAdmin
       .from("scout_lobby_players")
       .select("id, display_name, color")
       .eq("id", bounty.claimed_by_lobby_player_id)
@@ -675,7 +675,7 @@ export async function readTodayBountyPayload(lobbySlug: string) {
 // ─── Read API: bounty leaderboard (per-lobby all-time aggregate) ────
 export async function readBountyLeaderboard(lobbySlug: string) {
   // Pull every claimed bounty in this lobby with the joined player.
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_bounty_daily")
     .select(
       `

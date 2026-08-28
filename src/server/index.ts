@@ -21,6 +21,7 @@ import { howToWinHandler } from "./routes/aihelp/howtowin"
 import { getMultiRankHandler } from "./routes/multirank"
 import { getAssignedRolesHandler } from "./routes/getAssignedRoles"
 import { autocompleteHandler } from "./routes/autocomplete"
+import { userIconHandler } from "./routes/userIcon"
 import { getMatchInfoHandler } from "./routes/getMatchInfo"
 import { getMatchTimelineHandler } from "./routes/getMatchTimeline"
 import { getItemStatsHandler } from "./routes/getItemStats"
@@ -38,6 +39,13 @@ import { getSeasonStatsHandler } from "./routes/season_stats";
 import { getSplitStatsHandler } from "./routes/split_stats";
 import { createScoutLobbyHandler, readScoutLobbyHandler, readScoutFeedHandler, readScoutLeaderboardHandler, readScoutStatsHandler, readScoutChampionsHandler, readScoutHabitsHandler, refreshScoutLobbyHandler, updateScoutLobbyHandler, resolvePuuidHandler, readScoutTrendingHandler, readMyScoutLobbiesHandler, deleteScoutLobbyHandler, readScoutLpTimelineHandler, readScoutLiveHandler, debugScoutSnapshotsHandler } from "./routes/scout";
 import { readScoutBountyTodayHandler, readScoutBountyLeaderboardHandler, previewScoutBountyHandler } from "./routes/scoutBountyRoutes";
+import {
+  listScoutWebhooksHandler,
+  createScoutWebhookHandler,
+  updateScoutWebhookHandler,
+  deleteScoutWebhookHandler,
+  testScoutWebhookHandler,
+} from "./routes/scoutWebhooks";
 import {
   createOrReadClaimInviteHandler,
   deleteClaimInviteHandler,
@@ -599,6 +607,10 @@ if (pathname === "/api/autocomplete" && req.method === "POST") {
   return withLogAndCors(req, pathname, autocompleteHandler);
 }
 
+if (pathname === "/api/user-icon" && req.method === "GET") {
+  return withLogAndCors(req, pathname, userIconHandler);
+}
+
 if (pathname === "/api/pro/check" && req.method === "POST") {
   return withLogAndCors(req, pathname, checkProHandler);
 }
@@ -869,6 +881,31 @@ if (pathname.startsWith("/api/scout/refresh/") && req.method === "POST") {
 
 if (pathname.startsWith("/api/scout/resolve-puuid/") && req.method === "GET") {
   return withLogAndCors(req, pathname, (r) => resolvePuuidHandler(r, pathname));
+}
+
+// ── Discord webhook integrations (lobby owner only) ────────────────────
+// /test is matched first: it is longer than the plain /<id> routes.
+if (
+  /^\/api\/scout\/webhooks\/[^/]+\/[^/]+\/test$/.test(pathname) &&
+  req.method === "POST"
+) {
+  return withLogAndCors(req, pathname, (r) => testScoutWebhookHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+$/.test(pathname) && req.method === "GET") {
+  return withLogAndCors(req, pathname, (r) => listScoutWebhooksHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+$/.test(pathname) && req.method === "POST") {
+  return withLogAndCors(req, pathname, (r) => createScoutWebhookHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+\/[^/]+$/.test(pathname) && req.method === "PATCH") {
+  return withLogAndCors(req, pathname, (r) => updateScoutWebhookHandler(r, pathname));
+}
+
+if (/^\/api\/scout\/webhooks\/[^/]+\/[^/]+$/.test(pathname) && req.method === "DELETE") {
+  return withLogAndCors(req, pathname, (r) => deleteScoutWebhookHandler(r, pathname));
 }
 
 if (pathname === "/api/streamers/live" && req.method === "GET") {
