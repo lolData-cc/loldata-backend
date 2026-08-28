@@ -19,7 +19,7 @@
 // match-v5 data on every render via the Riot-direct path. Snapshots
 // are the only piece the cron needs to babysit.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { writeRankSnapshot } from "./rankSnapshot";
 import { ensureDailyBounty } from "./scoutBounty";
 import { sweepScoutWebhooks } from "./scoutWebhookSweep";
@@ -33,7 +33,7 @@ let started = false;
 async function sweepOnce(): Promise<void> {
   const startedAt = Date.now();
 
-  const { data: rows, error } = await supabaseAdmin
+  const { data: rows, error } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select("puuid, region");
 
@@ -104,7 +104,7 @@ async function sweepOnce(): Promise<void> {
   // idempotent: a fast-path SELECT on the days the row already exists.
   try {
     const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString();
-    const { data: lobbies } = await supabaseAdmin
+    const { data: lobbies } = await supabaseMatchAdmin
       .from("scout_lobbies")
       .select("slug, last_active_at")
       .gte("last_active_at", sevenDaysAgo);

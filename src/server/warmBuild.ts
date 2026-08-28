@@ -15,10 +15,18 @@ import { explorerPool } from "./explorer/pool"
 import { computeLiveBuild, upsertBuildLive } from "./routes/getChampionBuild"
 import { computeDuos, upsertDuosL2 } from "./routes/getChampionDuos"
 
-async function main() {
-  const pool = explorerPool()
+// Duos has been failing 100% of the time (the Explorer self-join outruns the
+// statement timeout for every champion). At 120s a pop that is ~5.6h of pure
+// waste, which is what starved the build warm below: systemd killed the unit at
+// its 2h TimeoutStartSec before build_live was ever touched. Two guards now:
+// a much shorter per-champion timeout so a failure costs 25s instead of 120,
+// and a hard wall-clock budget for the whole stage.
+const DUO_STATEMENT_TIMEOUT_MS = 25_000
+const DUO_STAGE_BUDGET_MS = 20 * 60 * 1000
+const SKIP_DUOS = process.env.WARM_SKIP_DUOS === "1"
 
-  // ── 1. duos (169 champions), popularity-ordered, N concurrent ──
+async function warmDuos(pool: ReturnType<typeof explorerPool>) {
+  // ── duos (169 champions), popularity-ordered, N concurrent ──
   // Each compute is single-threaded (parallel=0, /dev/shm-safe); concurrency is
   // at the connection level, so a handful run at once to cut wall-clock ~4x.
   const champs = await pool.query(
@@ -39,10 +47,14 @@ async function main() {
     while (true) {
       const i = dcursor++
       if (i >= champs.rows.length) break
+      if (Date.now() - td > DUO_STAGE_BUDGET_MS) {
+        console.warn("[warmBuild] duos budget spent — stopping this stage")
+        break
+      }
       const c = champs.rows[i] as any
       const client = await pool.connect()
       try {
-        await client.query("SET statement_timeout = 120000")
+        await client.query(`SET statement_timeout = ${DUO_STATEMENT_TIMEOUT_MS}`)
         await client.query("SET max_parallel_workers_per_gather = 0")
         const payload = await computeDuos(client, Number(c.id), String(c.name))
         await upsertDuosL2(client, Number(c.id), payload)
@@ -58,8 +70,10 @@ async function main() {
   }
   await Promise.all(Array.from({ length: DUO_CONC }, () => duoWorker()))
   console.log(`[warmBuild] duos DONE: ${dok} ok, ${dfail} fail in ${((Date.now() - td) / 1000).toFixed(0)}s`)
+}
 
-  // ── 2. build_live (per champion+role, popular first) ──
+async function warmBuildLive(pool: ReturnType<typeof explorerPool>) {
+  // ── build_live (per champion+role, popular first) ──
   const { rows } = await pool.query(
     `SELECT cs.champion_name, cs.role, cs.games
      FROM cbs_champion_stats cs
@@ -96,6 +110,23 @@ async function main() {
     }
   }
   console.log(`[warmBuild] build DONE: ${ok} ok, ${fail} fail in ${((Date.now() - t0) / 1000).toFixed(0)}s`)
+}
+
+async function main() {
+  const pool = explorerPool()
+
+  // ORDER MATTERS. build_live backs the champion Build tab, which is what a
+  // user actually waits on; duos backs a secondary tab. Warming duos first
+  // meant one broken stage could — and did — leave the Build tab reading live
+  // from participants and timing out.
+  await warmBuildLive(pool)
+
+  if (SKIP_DUOS) {
+    console.log("[warmBuild] duos skipped (WARM_SKIP_DUOS=1)")
+  } else {
+    await warmDuos(pool)
+  }
+
   process.exit(0)
 }
 

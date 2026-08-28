@@ -3,7 +3,7 @@
 // and player's actual role history from the DB (participants table).
 
 import { getRolesMap } from "../supabase/queries"
-import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client" // match → box, users → Cloud (hybrid)
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client" // match → box, users → box (migrated 2026-08-28)
 
 export type TeamId = 100 | 200
 export type Role = "top" | "jungle" | "mid" | "bot" | "support"
@@ -41,7 +41,7 @@ async function getPlayerRoleHistories(
 
   if (names.length === 0) return new Map()
 
-  const { data: users } = await supabaseAdmin
+  const { data: users } = await supabaseMatchAdmin
     .from("users")
     .select("puuid, name, tag")
     .in("name", names.map(n => n.name))

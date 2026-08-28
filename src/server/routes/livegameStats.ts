@@ -2,7 +2,7 @@
 // Returns champion winrate + filled detection for live game participants.
 // Reads from season_champion_aggregates + participants tables (populated by cron).
 
-import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match → box, users → Cloud (hybrid)
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match → box, users → box (migrated 2026-08-28)
 import { getCurrentSeasonWindow } from "../season";
 
 type ParticipantInput = {
@@ -48,7 +48,7 @@ export async function getLivegameStatsHandler(req: Request): Promise<Response> {
     }
 
     const names = [...riotIdToName.values()].map((v) => v.name);
-    const { data: userRows } = await supabaseAdmin
+    const { data: userRows } = await supabaseMatchAdmin
       .from("users")
       .select("puuid, name, tag")
       .in("name", names);

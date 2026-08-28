@@ -1,5 +1,5 @@
 // src/server/dbSeasonCache.ts
-import { supabase } from "../server/supabase/client";
+import { supabase, supabaseMatch } from "../server/supabase/client";
 
 export type SeasonStatsPayload = {
   topChampions: any[];
@@ -49,7 +49,7 @@ function parseCacheKey(cacheKey: string) {
 }
 
 export async function readSeasonCache(cacheKey: string): Promise<SeasonStatsPayload | null> {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseMatch
     .from("season_stats_cache")
     .select("payload, expires_at")
     .eq("cache_key", cacheKey)
@@ -68,7 +68,7 @@ export async function readSeasonCache(cacheKey: string): Promise<SeasonStatsPayl
 }
 
 export async function readStaleSeasonCache(cacheKey: string): Promise<SeasonStatsPayload | null> {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseMatch
     .from("season_stats_cache")
     .select("payload")
     .eq("cache_key", cacheKey)
@@ -104,7 +104,7 @@ export async function writeSeasonCache(
     queue_group: queueGroup,
   };
 
-  const { error } = await supabase
+  const { error } = await supabaseMatch
     .from("season_stats_cache")
     .upsert(row, { onConflict: "cache_key" });
 
@@ -114,7 +114,7 @@ export async function writeSeasonCache(
 }
 
 export async function purgeExpiredSeasonCache() {
-  const { error } = await supabase
+  const { error } = await supabaseMatch
     .from("season_stats_cache")
     .delete()
     .lt("expires_at", new Date().toISOString());

@@ -16,7 +16,7 @@
 // The create handler inserts the creator's admins row on lobby creation;
 // lobbies created before that fix are covered by the owner_user_id path.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { logger } from "../logger";
 
 const jsonHeaders = { "Content-Type": "application/json" } as const;
@@ -39,14 +39,14 @@ async function isLobbyAdmin(
   // This is belt-and-suspenders: the create handler inserts a creator row,
   // but if that row is ever missing (e.g. a lobby created before the fix)
   // the owner must not be locked out of their own lobby's admin actions.
-  const { data: lobby } = await supabaseAdmin
+  const { data: lobby } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("owner_user_id")
     .eq("slug", lobbySlug)
     .maybeSingle();
   if (lobby?.owner_user_id && lobby.owner_user_id === profileId) return true;
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_lobby_admins")
     .select("profile_id")
     .eq("lobby_slug", lobbySlug)
@@ -121,7 +121,7 @@ export async function createOrReadClaimInviteHandler(
   if (!(await isLobbyAdmin(slug, userId))) return errorJson(403, "admin only");
 
   // Validate the player belongs to this lobby.
-  const { data: player } = await supabaseAdmin
+  const { data: player } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select("id, lobby_slug, claimed_by_profile_id")
     .eq("id", playerId)
@@ -131,7 +131,7 @@ export async function createOrReadClaimInviteHandler(
 
   // Reuse existing invite if there is one (the UNIQUE constraint on
   // lobby_player_id guarantees at most one row).
-  const { data: existing } = await supabaseAdmin
+  const { data: existing } = await supabaseMatchAdmin
     .from("scout_player_claim_invites")
     .select("token, created_at")
     .eq("lobby_player_id", playerId)
@@ -142,7 +142,7 @@ export async function createOrReadClaimInviteHandler(
     token = existing.token;
   } else {
     token = generateToken();
-    const { error: insErr } = await supabaseAdmin
+    const { error: insErr } = await supabaseMatchAdmin
       .from("scout_player_claim_invites")
       .insert({
         lobby_slug: slug,
@@ -186,7 +186,7 @@ export async function deleteClaimInviteHandler(
   if (!userId) return errorJson(401, "auth required");
   if (!(await isLobbyAdmin(slug, userId))) return errorJson(403, "admin only");
 
-  const { error: delErr } = await supabaseAdmin
+  const { error: delErr } = await supabaseMatchAdmin
     .from("scout_player_claim_invites")
     .delete()
     .eq("lobby_player_id", playerId)
@@ -212,14 +212,14 @@ export async function readClaimInviteHandler(
   const token = lastSegment(pathname);
   if (!token) return errorJson(400, "bad path");
 
-  const { data: invite } = await supabaseAdmin
+  const { data: invite } = await supabaseMatchAdmin
     .from("scout_player_claim_invites")
     .select("token, lobby_slug, lobby_player_id, created_at")
     .eq("token", token)
     .maybeSingle();
   if (!invite) return errorJson(404, "invite not found");
 
-  const { data: player } = await supabaseAdmin
+  const { data: player } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select(
       "id, display_name, color, claimed_by_profile_id, scout_lobby_accounts(puuid, region, riot_name, riot_tag, is_primary)"
@@ -228,7 +228,7 @@ export async function readClaimInviteHandler(
     .maybeSingle();
   if (!player) return errorJson(404, "player gone");
 
-  const { data: lobby } = await supabaseAdmin
+  const { data: lobby } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("slug, name, hero_champion")
     .eq("slug", invite.lobby_slug)
@@ -278,7 +278,7 @@ export async function claimInviteHandler(
   const userId = await getAuthUserId(req);
   if (!userId) return errorJson(401, "sign in to claim");
 
-  const { data: invite } = await supabaseAdmin
+  const { data: invite } = await supabaseMatchAdmin
     .from("scout_player_claim_invites")
     .select("lobby_slug, lobby_player_id")
     .eq("token", token)
@@ -286,7 +286,7 @@ export async function claimInviteHandler(
   if (!invite) return errorJson(404, "invite not found or revoked");
 
   // One human, one claim per lobby — block double-claims.
-  const { data: already } = await supabaseAdmin
+  const { data: already } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select("id, display_name")
     .eq("lobby_slug", invite.lobby_slug)
@@ -300,7 +300,7 @@ export async function claimInviteHandler(
   }
 
   // Atomic: only succeeds if claimed_by_profile_id IS NULL right now.
-  const { data: claimed, error: updErr } = await supabaseAdmin
+  const { data: claimed, error: updErr } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .update({
       claimed_by_profile_id: userId,
@@ -355,7 +355,7 @@ export async function patchVerifyBadgeHandler(
   }
   if (typeof body?.show !== "boolean") return errorJson(400, "show: boolean required");
 
-  const { error: updErr } = await supabaseAdmin
+  const { error: updErr } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .update({ show_verify_badge: body.show })
     .eq("id", playerId)
@@ -386,7 +386,7 @@ export async function readLobbyAdminsHandler(
   const slug = parts[parts.length - 2];
   if (!slug) return errorJson(400, "bad path");
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_lobby_admins")
     .select("profile_id, granted_at, granted_by")
     .eq("lobby_slug", slug)
@@ -433,7 +433,7 @@ export async function promoteAdminHandler(
   if (!body?.profileId) return errorJson(400, "profileId required");
 
   // Verify the target is a claimed user in this lobby.
-  const { data: claimedPlayer } = await supabaseAdmin
+  const { data: claimedPlayer } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select("id")
     .eq("lobby_slug", slug)
@@ -441,7 +441,7 @@ export async function promoteAdminHandler(
     .maybeSingle();
   if (!claimedPlayer) return errorJson(400, "target is not claimed in this lobby");
 
-  const { error: insErr } = await supabaseAdmin
+  const { error: insErr } = await supabaseMatchAdmin
     .from("scout_lobby_admins")
     .insert({
       lobby_slug: slug,
@@ -481,7 +481,7 @@ export async function demoteAdminHandler(
   if (!(await isLobbyAdmin(slug, userId))) return errorJson(403, "admin only");
 
   // Block creator demotion.
-  const { data: lobby } = await supabaseAdmin
+  const { data: lobby } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("owner_user_id")
     .eq("slug", slug)
@@ -489,7 +489,7 @@ export async function demoteAdminHandler(
   if (lobby?.owner_user_id === targetProfileId)
     return errorJson(403, "cannot demote the lobby creator");
 
-  const { error: delErr } = await supabaseAdmin
+  const { error: delErr } = await supabaseMatchAdmin
     .from("scout_lobby_admins")
     .delete()
     .eq("lobby_slug", slug)

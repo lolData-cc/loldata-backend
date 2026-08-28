@@ -7,7 +7,7 @@ import {
   getSummonerByPuuid,
   getAccountByPuuid,
 } from "../riot";
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { getBadgeData } from "../services/proBadges";
 
 const LADDER_TTL_MS = 60_000;      // cache lista base (CH+GM+M) 1 min
@@ -231,7 +231,7 @@ export async function getLeaderboardHandler(req: Request): Promise<Response> {
     const puuids = enriched.map((e: any) => e.puuid).filter(Boolean);
     let topChampsMap: Record<string, any[]> = {};
     if (puuids.length > 0) {
-      const { data: usersData } = await supabaseAdmin
+      const { data: usersData } = await supabaseMatchAdmin
         .from("users")
         .select("puuid, top_champions")
         .in("puuid", puuids);

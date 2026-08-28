@@ -18,7 +18,7 @@
 //   POST  /api/scout/lobby/:slug/match/:matchId/comments
 //         { content }. Verify-mode gating mirrors the chat handler.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { logger } from "../logger";
 
 const jsonHeaders = { "Content-Type": "application/json" } as const;
@@ -77,7 +77,7 @@ export async function readMatchSocialBatchHandler(
   }
 
   // Likes per match.
-  const { data: reactionRows, error: rErr } = await supabaseAdmin
+  const { data: reactionRows, error: rErr } = await supabaseMatchAdmin
     .from("scout_match_reactions")
     .select("match_id, profile_id")
     .eq("lobby_slug", slug)
@@ -88,7 +88,7 @@ export async function readMatchSocialBatchHandler(
   }
 
   // Comments per match — just counts (full list comes from /comments).
-  const { data: commentRows, error: cErr } = await supabaseAdmin
+  const { data: commentRows, error: cErr } = await supabaseMatchAdmin
     .from("scout_match_comments")
     .select("match_id")
     .eq("lobby_slug", slug)
@@ -109,7 +109,7 @@ export async function readMatchSocialBatchHandler(
   );
   const profileLabel = new Map<string, { displayName: string; color: string | null }>();
   if (likerProfileIds.length > 0) {
-    const { data: claimed } = await supabaseAdmin
+    const { data: claimed } = await supabaseMatchAdmin
       .from("scout_lobby_players")
       .select("claimed_by_profile_id, display_name, color")
       .eq("lobby_slug", slug)
@@ -173,7 +173,7 @@ export async function toggleLikeHandler(
   if (!userId) return errorJson(401, "sign in to like");
 
   // Check current state.
-  const { data: existing } = await supabaseAdmin
+  const { data: existing } = await supabaseMatchAdmin
     .from("scout_match_reactions")
     .select("id")
     .eq("lobby_slug", slug)
@@ -183,7 +183,7 @@ export async function toggleLikeHandler(
 
   let iLiked: boolean;
   if (existing) {
-    const { error } = await supabaseAdmin
+    const { error } = await supabaseMatchAdmin
       .from("scout_match_reactions")
       .delete()
       .eq("id", existing.id);
@@ -193,7 +193,7 @@ export async function toggleLikeHandler(
     }
     iLiked = false;
   } else {
-    const { error } = await supabaseAdmin
+    const { error } = await supabaseMatchAdmin
       .from("scout_match_reactions")
       .insert({ lobby_slug: slug, match_id: matchId, profile_id: userId });
     if (error) {
@@ -211,7 +211,7 @@ export async function toggleLikeHandler(
   }
 
   // Recount.
-  const { count } = await supabaseAdmin
+  const { count } = await supabaseMatchAdmin
     .from("scout_match_reactions")
     .select("id", { count: "exact", head: true })
     .eq("lobby_slug", slug)
@@ -236,7 +236,7 @@ export async function readCommentsHandler(
   const limitRaw = Number(url.searchParams.get("limit") ?? 100);
   const limit = Math.min(200, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 100));
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_match_comments")
     .select(
       "id, profile_id, lobby_player_id, display_name, color, content, parent_comment_id, created_at"
@@ -298,7 +298,7 @@ export async function postCommentHandler(
   // every comment is attributable to a claimed lobby member. (Earlier
   // a verify_mode='disabled' bypass let any signed-in user post as
   // "Anonymous"; that's removed.)
-  const { data: claimedPlayer } = await supabaseAdmin
+  const { data: claimedPlayer } = await supabaseMatchAdmin
     .from("scout_lobby_players")
     .select("id, display_name, color")
     .eq("lobby_slug", slug)
@@ -319,7 +319,7 @@ export async function postCommentHandler(
   // If a parent comment id was supplied, validate it belongs to this
   // same (lobby_slug, match_id) so we can't cross-thread replies.
   if (parentCommentId) {
-    const { data: parent } = await supabaseAdmin
+    const { data: parent } = await supabaseMatchAdmin
       .from("scout_match_comments")
       .select("id, lobby_slug, match_id")
       .eq("id", parentCommentId)
@@ -333,7 +333,7 @@ export async function postCommentHandler(
     }
   }
 
-  const { data: inserted, error } = await supabaseAdmin
+  const { data: inserted, error } = await supabaseMatchAdmin
     .from("scout_match_comments")
     .insert({
       lobby_slug: slug,

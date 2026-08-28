@@ -3,7 +3,7 @@
 // Match details are fetched in parallel batches from Riot (with in-memory cache).
 // DB ingestion runs purely in the background — never blocks the response.
 
-import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match tables → box, users → Cloud (hybrid)
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"; // match tables → box, users → box (migrated 2026-08-28)
 import { getAccountByRiotId, getMatchDetails, getMatchIdsByPuuidOpts, RateLimitError } from "../riot";
 import { ingestQuickThenBackground } from "../services/matchIngest";
 import { computeLpDeltas } from "../services/rankSnapshot";
@@ -46,7 +46,7 @@ async function resolvePuuid(name: string, tag: string, region: string): Promise<
     puuidCache.set(key, { puuid: acc.puuid, ts: Date.now() });
     return acc.puuid;
   } catch {
-    const { data } = await supabaseAdmin.from("users").select("puuid").eq("name", name).eq("tag", tag).maybeSingle();
+    const { data } = await supabaseMatchAdmin.from("users").select("puuid").eq("name", name).eq("tag", tag).maybeSingle();
     if (data?.puuid) { puuidCache.set(key, { puuid: data.puuid, ts: Date.now() }); return data.puuid; }
     return null;
   }

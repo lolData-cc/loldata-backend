@@ -1,4 +1,4 @@
-import { supabaseAdmin } from "../supabase/client"
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client"
 import { getAccountByRiotId } from "../riot"
 
 // Shape returned to the frontend for each suggestion. `users` rows have the
@@ -40,7 +40,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
         const account = await getAccountByRiotId(namePart.trim(), tagPart.trim(), region)
         if (account) {
           // Check if we have this player in DB for extra info
-          const { data: dbRow } = await supabaseAdmin
+          const { data: dbRow } = await supabaseMatchAdmin
             .from("users")
             .select("name, tag, icon_id, rank, region")
             .eq("name", account.gameName)
@@ -70,7 +70,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
   // (= never upserted into `users`) were invisible to the autocomplete
   // even though the rest of the app already knew about them.
   const [usersStartsRes, playersStartsRes, scoutStartsRes] = await Promise.all([
-    supabaseAdmin
+    supabaseMatchAdmin
       .from("users")
       .select("name, tag, icon_id, rank, region")
       .ilike("name", `${searchName}%`)
@@ -78,13 +78,13 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
       .limit(5),
     // `players` — the ladder-crawled index (every ranked apex player),
     // so search isn't limited to profiles someone happened to open.
-    supabaseAdmin
+    supabaseMatchAdmin
       .from("players")
       .select("game_name, tag_line, icon_id, tier, platform")
       .ilike("game_name", `${searchName}%`)
       .order("lp", { ascending: false, nullsFirst: false })
       .limit(8),
-    supabaseAdmin
+    supabaseMatchAdmin
       .from("scout_lobby_accounts")
       .select("riot_name, riot_tag, region")
       .ilike("riot_name", `${searchName}%`)
@@ -108,19 +108,19 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
   // scan isn't catastrophic. Searches the same two tables in parallel.
   if (results.length === 0 && searchName.length >= 4) {
     const [usersContainsRes, playersContainsRes, scoutContainsRes] = await Promise.all([
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("users")
         .select("name, tag, icon_id, rank, region")
         .ilike("name", `%${searchName}%`)
         .order("last_searched_at", { ascending: false })
         .limit(5),
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("players")
         .select("game_name, tag_line, icon_id, tier, platform")
         .ilike("game_name", `%${searchName}%`)
         .order("lp", { ascending: false, nullsFirst: false })
         .limit(8),
-      supabaseAdmin
+      supabaseMatchAdmin
         .from("scout_lobby_accounts")
         .select("riot_name, riot_tag, region")
         .ilike("riot_name", `%${searchName}%`)
@@ -145,7 +145,7 @@ export async function autocompleteHandler(req: Request): Promise<Response> {
     const orFilters = needsEnrichment
       .map((r) => `and(name.eq.${escapeOr(r.name)},tag.eq.${escapeOr(r.tag)})`)
       .join(",")
-    const { data: enrichRows } = await supabaseAdmin
+    const { data: enrichRows } = await supabaseMatchAdmin
       .from("users")
       .select("name, tag, icon_id, rank, region")
       .or(orFilters)

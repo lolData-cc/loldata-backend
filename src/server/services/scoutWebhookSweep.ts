@@ -19,7 +19,7 @@
 //     the webhook row are marked as posted without sending, so enabling an
 //     integration never dumps history into the channel
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { getMatchDetails, getMatchIdsByPuuidOpts } from "../riot";
 import { ladderScore } from "./rankSnapshot";
 import { lookupBadgeIdentities } from "./proBadges";
@@ -69,7 +69,7 @@ type AccountRow = {
 async function averageLobbyElo(puuids: string[]): Promise<number | null> {
   if (puuids.length === 0) return null;
   // Latest solo snapshot per puuid — cheap, already collected by the sweep.
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_rank_snapshots")
     .select("puuid, tier, rank_division, lp, created_at")
     .in("puuid", puuids)
@@ -128,7 +128,7 @@ async function resolveLp(
   // A narrow window around the game is enough to find the before/after pair —
   // the snapshot sweep runs every 5 min, so they are dense. (The feed pages
   // through a player's whole history because it resolves many games at once.)
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_rank_snapshots")
     .select("tier, rank_division, lp, taken_at, match_id")
     .eq("puuid", puuid)
@@ -168,7 +168,7 @@ async function resolveLp(
 
 async function markPosted(webhookId: string, matchIds: string[]): Promise<void> {
   if (matchIds.length === 0) return;
-  await supabaseAdmin
+  await supabaseMatchAdmin
     .from("scout_webhook_posted")
     .upsert(
       matchIds.map((m) => ({ webhook_id: webhookId, match_id: m })),
@@ -179,7 +179,7 @@ async function markPosted(webhookId: string, matchIds: string[]): Promise<void> 
 async function recordFailure(w: WebhookRow, error: string, permanent: boolean): Promise<void> {
   const nextCount = (w.fail_count ?? 0) + 1;
   const disable = permanent || nextCount >= AUTO_DISABLE_AFTER;
-  await supabaseAdmin
+  await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .update({
       last_error: permanent ? `${error} (auto-disabled)` : error,
@@ -191,7 +191,7 @@ async function recordFailure(w: WebhookRow, error: string, permanent: boolean): 
 }
 
 async function recordSuccess(webhookId: string): Promise<void> {
-  await supabaseAdmin
+  await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .update({ last_posted_at: new Date().toISOString(), fail_count: 0, last_error: null })
     .eq("id", webhookId);
@@ -200,7 +200,7 @@ async function recordSuccess(webhookId: string): Promise<void> {
 /** Process one webhook: find new matches for its lobby, post embeds. */
 async function processWebhook(w: WebhookRow): Promise<number> {
   // 1. the lobby's accounts
-  const { data: accounts, error: accErr } = await supabaseAdmin
+  const { data: accounts, error: accErr } = await supabaseMatchAdmin
     .from("scout_lobby_accounts")
     .select("puuid, region, lobby_player_id, scout_lobby_players!inner(id, display_name, lobby_slug)")
     .eq("scout_lobby_players.lobby_slug", w.lobby_slug);
@@ -242,7 +242,7 @@ async function processWebhook(w: WebhookRow): Promise<number> {
 
   // 3. drop the ones already posted
   const candidateIds = [...matchToPuuids.keys()];
-  const { data: already } = await supabaseAdmin
+  const { data: already } = await supabaseMatchAdmin
     .from("scout_webhook_posted")
     .select("match_id")
     .eq("webhook_id", w.id)
@@ -259,7 +259,7 @@ async function processWebhook(w: WebhookRow): Promise<number> {
   //    candidates: a lobby that goes quiet for longer than LOOKBACK_MS has no
   //    overlap with what it posted before, and a candidate-scoped check would
   //    read that as a first run and silently swallow the comeback games.
-  const { count: everPosted } = await supabaseAdmin
+  const { count: everPosted } = await supabaseMatchAdmin
     .from("scout_webhook_posted")
     .select("match_id", { count: "exact", head: true })
     .eq("webhook_id", w.id);
@@ -387,7 +387,7 @@ async function processWebhook(w: WebhookRow): Promise<number> {
     }
 
     // 6. lobby name for the embed author line
-    const { data: lobby } = await supabaseAdmin
+    const { data: lobby } = await supabaseMatchAdmin
       .from("scout_lobbies")
       .select("name")
       .eq("slug", w.lobby_slug)
@@ -430,7 +430,7 @@ async function processWebhook(w: WebhookRow): Promise<number> {
 export async function sweepScoutWebhooks(): Promise<void> {
   if (process.env.BOX_READ_ONLY === "true") return;
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .select(
       "id, lobby_slug, url, enabled, queue_filter, min_duration_s, created_at, fail_count, username, avatar_url"

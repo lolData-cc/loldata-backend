@@ -294,13 +294,74 @@ export async function computeLiveBuild(
   return { spells, bootsRows, supportRows, jungleRows, topPlayers, preciseRunes, buildPath, bootsSlot }
 }
 
-async function readBuildLive(client: any, champion: string, role: string): Promise<LiveBuild | null> {
+/**
+ * Read the L2 row REGARDLESS of age, reporting how stale it is.
+ *
+ * The freshness window used to be part of the query, so an old row was simply
+ * invisible and every request fell through to computeLiveBuild — which no
+ * longer fits inside the statement timeout on a 14M-match participants table.
+ * The result was a 15s 500 on the Build tab. A build from last month is a far
+ * better answer than an error, so staleness now decides whether to REFRESH,
+ * not whether to SERVE.
+ */
+async function readBuildLive(
+  client: any,
+  champion: string,
+  role: string
+): Promise<{ payload: LiveBuild; stale: boolean } | null> {
   const r = await client.query(
-    `SELECT payload FROM cbs_build_live
-     WHERE champion_name = $1 AND role = $2 AND computed_at > now() - interval '${L2_FRESH}'`,
+    `SELECT payload, computed_at < now() - interval '${L2_FRESH}' AS stale
+       FROM cbs_build_live
+      WHERE champion_name = $1 AND role = $2`,
     [champion, role]
   )
-  return (r.rows[0]?.payload as LiveBuild) ?? null
+  const row = r.rows[0]
+  if (!row?.payload) return null
+  return { payload: row.payload as LiveBuild, stale: Boolean(row.stale) }
+}
+
+// Champion/role pairs currently being recomputed in the background, so a burst
+// of requests for the same stale build triggers one refresh, not twenty.
+const refreshing = new Set<string>()
+
+// GLOBAL cap, not just per-pair. Each recompute is a heavy aggregate with its
+// own 128MB work_mem; letting one fire per stale request turned twelve page
+// views into twelve concurrent scans that starved the very requests they were
+// meant to speed up (0.2s responses became 30-60s). Background work must lose
+// to user traffic, always — a skipped refresh just means the row stays stale
+// and gets another chance on the next request or the nightly warm.
+const MAX_CONCURRENT_REFRESH = 1
+let refreshInFlight = 0
+
+/** Recompute a stale L2 row out of band. Never awaited by a request. */
+function refreshBuildLiveInBackground(champion: string, role: string): void {
+  const key = `${champion}:${role}`
+  if (refreshing.has(key)) return
+  if (refreshInFlight >= MAX_CONCURRENT_REFRESH) return
+  refreshing.add(key)
+  refreshInFlight++
+  void (async () => {
+    // connect() INSIDE the try: if the pool is saturated it rejects, and with
+    // the acquire outside we would leak the `refreshing` key and silently never
+    // retry that pair again for the life of the process.
+    let client: any = null
+    try {
+      client = await explorerPool().connect()
+      // Generous here precisely because nobody is waiting on it.
+      await client.query("SET statement_timeout = 120000")
+      await client.query("SET max_parallel_workers_per_gather = 0")
+      await client.query("SET work_mem = '128MB'")
+      const live = await computeLiveBuild(client, champion, role, null, null, null, { parallel: 0 })
+      await upsertBuildLive(client, champion, role, live)
+      console.log(`[build] refreshed L2 ${champion}/${role}`)
+    } catch (e: any) {
+      console.warn(`[build] background refresh failed ${champion}/${role}:`, e?.message ?? e)
+    } finally {
+      client?.release()
+      refreshing.delete(key)
+      refreshInFlight--
+    }
+  })()
 }
 
 export async function upsertBuildLive(client: any, champion: string, role: string, live: LiveBuild): Promise<void> {
@@ -310,6 +371,66 @@ export async function upsertBuildLive(client: any, champion: string, role: strin
      ON CONFLICT (champion_name, role) DO UPDATE SET payload = EXCLUDED.payload, computed_at = now()`,
     [champion, role, JSON.stringify(live)]
   )
+}
+
+/** Top jungle routes for a champion, straight off the nightly summary table.
+ *  One indexed lookup on a few thousand rows — never an aggregate at request
+ *  time. Returns null for non-junglers and when the summary has nothing yet. */
+async function readJunglePath(
+  client: any,
+  champion: string
+): Promise<{
+  totalGames: number
+  routes: {
+    route: number[]
+    games: number
+    winrate: number
+    /** The reset that ends this opening: when it lands and what gets bought.
+     *  Null until enough games carry it - see MIN_BACK_SAMPLE. */
+    back: { atSeconds: number; sample: number; items: { id: number; pct: number }[] } | null
+  }[]
+} | null> {
+  // participants.first_back_* is only captured from 2026-08-22 and cannot be
+  // backfilled (timelines are not stored), so early on a route can have tens of
+  // thousands of games behind it and a handful of observed resets. Publishing
+  // "84% buy Long Sword" off six games would be worse than publishing nothing.
+  const MIN_BACK_SAMPLE = 20
+  try {
+    const r = await client.query(
+      `SELECT route, games, winrate, champ_games,
+              back_sample, back_s, back_items, back_item_pct
+         FROM cbs_jungle_path
+        WHERE champion_name = $1
+        ORDER BY rn`,
+      [champion]
+    )
+    if (!r.rows.length) return null
+    return {
+      totalGames: Number(r.rows[0].champ_games ?? 0),
+      routes: r.rows.map((x: any) => {
+        const sample = Number(x.back_sample ?? 0)
+        const ids: number[] = x.back_items ?? []
+        const pcts: number[] = x.back_item_pct ?? []
+        return {
+          route: (x.route ?? []).map(Number),
+          games: Number(x.games),
+          winrate: Number(x.winrate),
+          back:
+            sample >= MIN_BACK_SAMPLE && x.back_s != null && ids.length
+              ? {
+                  atSeconds: Number(x.back_s),
+                  sample,
+                  items: ids.map((id, i) => ({ id: Number(id), pct: Number(pcts[i] ?? 0) })),
+                }
+              : null,
+        }
+      }),
+    }
+  } catch {
+    // Summary table may not exist yet on a fresh box — the Build tab must not
+    // fail because a secondary panel has no data.
+    return null
+  }
 }
 
 export async function getChampionBuildHandler(req: Request): Promise<Response> {
@@ -363,18 +484,26 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
     // ── live enrichment: L2 (cbs_build_live) for the default cohort, else live ──
     const defaultCohort = !vs && !fPatch && !fRegion
     let live: LiveBuild
+    let junglePath: Awaited<ReturnType<typeof readJunglePath>> = null
     const client = await explorerPool().connect()
     try {
       await client.query("SET statement_timeout = 15000")
       const cached = defaultCohort && role ? await readBuildLive(client, champion, role) : null
       if (cached) {
-        live = cached
+        // Serve now, refresh after — the user never waits on a recompute.
+        live = cached.payload
+        if (cached.stale) refreshBuildLiveInBackground(champion, role)
       } else {
         live = await computeLiveBuild(client, champion, role, vs, fPatch, fRegion)
         // write-through so the next request (and post-restart) is instant
         if (defaultCohort && role) {
           try { await upsertBuildLive(client, champion, role, live) } catch { /* non-fatal */ }
         }
+      }
+      // Jungle routes ride along on the same connection — a single indexed
+      // read, so the panel costs nothing extra in round trips.
+      if (role === "JUNGLE") {
+        junglePath = await readJunglePath(client, champion)
       }
     } finally {
       client.release()
@@ -402,6 +531,7 @@ export async function getChampionBuildHandler(req: Request): Promise<Response> {
       items: { boots: live.bootsRows, core: coreItems, situational, support: live.supportRows, jungle: live.jungleRows },
       topPlayers: live.topPlayers,
       availableRoles: roles.map((r) => ({ role: r.role, games: r.games })),
+      junglePath,
     }
     cache.set(cacheKey, { ts: Date.now(), payload })
     return Response.json(payload)

@@ -12,7 +12,7 @@
 // by ?key=<ownerKey>). A webhook URL is a bearer credential for a Discord
 // channel, so it is NEVER echoed back in full — list/read return a mask.
 
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import {
   buildMatchEmbeds,
   isValidAvatarUrl,
@@ -41,7 +41,7 @@ type OwnerCheck =
   | { ok: false; res: Response };
 
 async function requireLobbyOwner(req: Request, slug: string): Promise<OwnerCheck> {
-  const { data: lobby, error } = await supabaseAdmin
+  const { data: lobby, error } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("slug, name, owner_key, owner_user_id")
     .eq("slug", slug)
@@ -89,7 +89,7 @@ export async function listScoutWebhooksHandler(req: Request, pathname: string): 
   const auth = await requireLobbyOwner(req, slug);
   if (!auth.ok) return auth.res;
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .select("*")
     .eq("lobby_slug", slug)
@@ -122,7 +122,7 @@ export async function createScoutWebhookHandler(req: Request, pathname: string):
     );
   }
 
-  const { count } = await supabaseAdmin
+  const { count } = await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .select("id", { count: "exact", head: true })
     .eq("lobby_slug", slug);
@@ -141,7 +141,7 @@ export async function createScoutWebhookHandler(req: Request, pathname: string):
     ? body.queueFilter.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
     : null;
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .insert({
       lobby_slug: slug,
@@ -213,7 +213,7 @@ export async function updateScoutWebhookHandler(req: Request, pathname: string):
     return Response.json({ error: "Nothing to update" }, { status: 400 });
   }
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .update(patch)
     .eq("id", id)
@@ -236,7 +236,7 @@ export async function deleteScoutWebhookHandler(req: Request, pathname: string):
   const auth = await requireLobbyOwner(req, slug);
   if (!auth.ok) return auth.res;
 
-  const { error } = await supabaseAdmin
+  const { error } = await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .delete()
     .eq("id", id)
@@ -258,7 +258,7 @@ export async function testScoutWebhookHandler(req: Request, pathname: string): P
   const auth = await requireLobbyOwner(req, slug);
   if (!auth.ok) return auth.res;
 
-  const { data: row, error } = await supabaseAdmin
+  const { data: row, error } = await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .select("*")
     .eq("id", id)
@@ -308,14 +308,14 @@ export async function testScoutWebhookHandler(req: Request, pathname: string): P
     avatarUrl: (row as any).avatar_url,
   });
   if (!res.ok) {
-    await supabaseAdmin
+    await supabaseMatchAdmin
       .from("scout_lobby_webhooks")
       .update({ last_error: res.error, last_error_at: new Date().toISOString() })
       .eq("id", id);
     return Response.json({ error: `Delivery failed: ${res.error}` }, { status: 502 });
   }
 
-  await supabaseAdmin
+  await supabaseMatchAdmin
     .from("scout_lobby_webhooks")
     .update({ last_error: null, fail_count: 0, last_posted_at: new Date().toISOString() })
     .eq("id", id);

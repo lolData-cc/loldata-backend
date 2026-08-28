@@ -21,6 +21,7 @@ import { howToWinHandler } from "./routes/aihelp/howtowin"
 import { getMultiRankHandler } from "./routes/multirank"
 import { getAssignedRolesHandler } from "./routes/getAssignedRoles"
 import { autocompleteHandler } from "./routes/autocomplete"
+import { userIconHandler } from "./routes/userIcon"
 import { getMatchInfoHandler } from "./routes/getMatchInfo"
 import { getMatchTimelineHandler } from "./routes/getMatchTimeline"
 import { getItemStatsHandler } from "./routes/getItemStats"
@@ -604,6 +605,10 @@ if (pathname === "/api/aihelp/matchups" && req.method === "POST") {
 
 if (pathname === "/api/autocomplete" && req.method === "POST") {
   return withLogAndCors(req, pathname, autocompleteHandler);
+}
+
+if (pathname === "/api/user-icon" && req.method === "GET") {
+  return withLogAndCors(req, pathname, userIconHandler);
 }
 
 if (pathname === "/api/pro/check" && req.method === "POST") {

@@ -1,3 +1,9 @@
 .env
 node_modules
 .lolpros-scrape-state.json
+
+# ⚠️ Ogni variante di .env porta gli stessi segreti del .env: chiave Riot,
+# service role, Stripe, Anthropic. Questa repo e' PUBBLICA, quindi un solo
+# `git add .` con un .env.bak accanto li pubblica per sempre.
+.env*
+!.env.example

@@ -15,7 +15,7 @@ import {
   formatBountyValue,
 } from "../services/scoutBounty";
 import { broadcastBountyEvent } from "../realtime/scoutRealtime";
-import { supabaseAdmin } from "../supabase/client";
+import { supabaseAdmin, supabaseMatchAdmin } from "../supabase/client";
 import { logger } from "../logger";
 
 async function getAuthUserId(req: Request): Promise<string | null> {
@@ -101,7 +101,7 @@ export async function previewScoutBountyHandler(
   }
 
   // Owner gate.
-  const { data: lobby } = await supabaseAdmin
+  const { data: lobby } = await supabaseMatchAdmin
     .from("scout_lobbies")
     .select("owner_user_id")
     .eq("slug", slug)

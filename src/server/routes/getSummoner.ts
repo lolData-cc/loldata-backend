@@ -1,4 +1,4 @@
-import { supabase } from '../supabase/client'
+import { supabase, supabaseMatch } from '../supabase/client'
 import { ingestQuickThenBackground } from '../services/matchIngest'
 import { getTopLadder } from '../riot'
 
@@ -133,6 +133,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
     const rankedData = await rankedRes.json()
     const soloQueue = rankedData.find((e: any) => e.queueType === "RANKED_SOLO_5x5")
     const flexQueue = rankedData.find((e: any) => e.queueType === "RANKED_FLEX_SR")
+    const premadeQueue = rankedData.find((e: any) => e.queueType === "RANKED_PREMADE_5x5") // Ranked 5s (queue 710)
 
     // ---- Parallel: profile sync + avatar fetch + peak rank fetch ----
     const nametag = `${account.gameName}#${account.tagLine}`
@@ -175,7 +176,7 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
           return rowByName?.avatar_url ?? null
         }),
       // Peak rank
-      supabase
+      supabaseMatch
         .from("users")
         .select("peak_rank, peak_lp, peak_flex_rank, peak_flex_lp")
         .eq("name", account.gameName)
@@ -242,12 +243,16 @@ export async function getSummonerHandler(req: Request): Promise<Response> {
       flexLp:   flexQueue?.leaguePoints ?? 0,
       peakFlexRank: peakFlexRank,
       peakFlexLp:   peakFlexLP,
+      ranked5Rank: premadeQueue ? `${premadeQueue.tier} ${premadeQueue.rank}` : "Unranked",
+      ranked5Lp: premadeQueue?.leaguePoints ?? 0,
+      ranked5Wins: premadeQueue?.wins ?? 0,
+      ranked5Losses: premadeQueue?.losses ?? 0,
       avatar_url: avatarUrl,
       ladderRank,
     }
 
     // Upsert utente (come prima)
-    const { error } = await supabase.from("users").upsert({
+    const { error } = await supabaseMatch.from("users").upsert({
       name:  account.gameName,
       tag:   account.tagLine,
       puuid: account.puuid,
