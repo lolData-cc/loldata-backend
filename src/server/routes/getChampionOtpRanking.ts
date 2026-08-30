@@ -19,22 +19,22 @@
 
 import { explorerPool } from "../explorer/pool";
 
-const MASTER_PLUS = ["MASTER", "GRANDMASTER", "CHALLENGER"];
-const MIN_CHAMP_GAMES = 10;
-const PLAYRATE_THRESHOLD = 0.4; // 40% of their games on this champ
+export const MASTER_PLUS = ["MASTER", "GRANDMASTER", "CHALLENGER"];
+export const MIN_CHAMP_GAMES = 10;
+export const PLAYRATE_THRESHOLD = 0.4; // 40% of their games on this champ
 const LIMIT = 50;
 
 // The box crawls EU only → platforms EUW1 / EUN1. Map the UI region key to a
 // platform filter (ALL → no filter). Keep this in sync with REGIONS in the
 // ChampionOtpRanking component.
-const REGION_TO_PLATFORM: Record<string, string | null> = {
+export const REGION_TO_PLATFORM: Record<string, string | null> = {
   ALL: null,
   EUW: "EUW1",
   EUNE: "EUN1",
 };
 
 // platform → routing region the summoner page understands (for the row link).
-const PLATFORM_TO_REGION: Record<string, string> = {
+export const PLATFORM_TO_REGION: Record<string, string> = {
   EUW1: "EUW",
   EUN1: "EUNE",
 };

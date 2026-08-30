@@ -95,6 +95,7 @@ import { generateSnapshotHandler, getTierlistHandler } from "./routes/getTierlis
 import { learnOverviewHandler } from "./routes/learn/overview";
 import { improvementTreeHandler } from "./routes/learn/improvementTree";
 import { getChampionOtpRankingHandler } from "./routes/getChampionOtpRanking";
+import { getChampionOtpRunesHandler } from "./routes/getChampionOtpRunes";
 import { patchNotesHandler, patchLatestMapHandler, patchLatestChangesHandler } from "./routes/patchNotes";
 import { playerProfileHandler } from "./routes/playerProfile";
 import { prosDirectoryHandler, prosBadgeMapHandler, prosIdentityHandler, prosSearchHandler } from "./routes/prosDirectory";
@@ -960,6 +961,10 @@ if (pathname === "/api/admin/reload-snapshots" && req.method === "POST") {
     await preloadSnapshots();
     return Response.json({ reloaded: true, ms: Date.now() - t0 });
   });
+}
+
+if (pathname === "/api/champion/otp-runes" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getChampionOtpRunesHandler);
 }
 
 if (pathname === "/api/champion/otp-ranking" && req.method === "POST") {
