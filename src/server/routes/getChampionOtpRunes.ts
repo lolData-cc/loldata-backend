@@ -72,46 +72,59 @@ export async function getChampionOtpRunesHandler(req: Request): Promise<Response
 
   const platform = REGION_TO_PLATFORM[regionKey] ?? null;
 
+  /**
+   * ⚠️ STARTS FROM THE NIGHTLY SUMMARY, not from `participants`.
+   *
+   * The first version grouped `participants` by puuid for `champion_name = $1`
+   * — a 99M-row table — and it did not merely run slowly: in production it hit
+   * the route's own 8s statement_timeout every single time and answered 500.
+   * The feature had never once worked.
+   *
+   * `otp_champion_players` already holds games/wins per champion per player,
+   * rebuilt nightly, and it is the same table the OTP ranking was moved onto
+   * for exactly this reason. It carries no ROLE and no full rune page, so it
+   * cannot answer alone — but it can name the two dozen candidates worth
+   * looking at, and then the only reads of `participants` are keyed on
+   * `puuid`, which is an index lookup instead of a scan.
+   *
+   * The role filter therefore lives in the LATERAL, where it belongs: a
+   * candidate with no games on this champion in THIS role produces no row and
+   * drops out, which is the same rule the panel applies everywhere else.
+   */
   const sql = `
-    WITH champ AS (
-      SELECT p.puuid,
-             count(*)                      AS role_games,
-             count(*) FILTER (WHERE p.win) AS role_wins
-        FROM participants p
-       WHERE p.champion_name = $1
-         AND p.role = $2
-         AND p.puuid IS NOT NULL
-       GROUP BY p.puuid
-    ),
-    ranked AS (
-      SELECT c.*, pl.game_name, pl.tag_line, pl.tier, pl.division, pl.lp, pl.platform
-        FROM champ c
-        JOIN players pl ON pl.puuid = c.puuid
-       WHERE pl.tier = ANY($3)
-         AND c.role_games >= $4
+    WITH cand AS (
+      SELECT o.puuid,
+             o.champ_games,
+             o.champ_wins,
+             o.total_games,
+             pl.game_name, pl.tag_line, pl.tier, pl.division, pl.lp, pl.platform
+        FROM otp_champion_players o
+        JOIN players pl ON pl.puuid = o.puuid
+       WHERE o.champion_name = $1
+         AND pl.tier = ANY($3)
+         AND o.champ_games >= $4
          AND ($5::text IS NULL OR pl.platform = $5)
-    ),
-    totals AS (
-      SELECT puuid, count(*) AS total_games
-        FROM participants
-       WHERE puuid IN (SELECT puuid FROM ranked)
-       GROUP BY puuid
+         AND (o.champ_games::float / NULLIF(o.total_games, 0)) >= $6
+       ORDER BY CASE pl.tier WHEN 'CHALLENGER' THEN 0 WHEN 'GRANDMASTER' THEN 1 WHEN 'MASTER' THEN 2 ELSE 9 END,
+                pl.lp DESC NULLS LAST
+       LIMIT 25
     )
-    SELECT r.game_name, r.tag_line, r.tier, r.division, r.lp, r.platform,
-           r.role_games, r.role_wins,
+    SELECT c.game_name, c.tag_line, c.tier, c.division, c.lp, c.platform,
+           pg.role_games, pg.role_wins,
            pg.keystone, pg.primary_style, pg.sub_style,
            pg.perk_primary, pg.perk_secondary, pg.stat_perks, pg.page_games
-      FROM ranked r
-      JOIN totals t ON t.puuid = r.puuid
+      FROM cand c
       -- ⚠️ LATERAL, so the page is the page THIS player actually runs, not the
       -- cohort's average. That is the whole point of asking a person rather
-      -- than a population.
+      -- than a population. Keyed on puuid: bounded, indexed, fast.
       JOIN LATERAL (
         SELECT p.perk_keystone AS keystone, p.perk_primary_style AS primary_style,
                p.perk_sub_style AS sub_style, p.perk_primary, p.perk_secondary, p.stat_perks,
-               count(*)::int AS page_games
+               count(*)::int AS page_games,
+               sum(count(*)) OVER ()::int              AS role_games,
+               sum(count(*) FILTER (WHERE p.win)) OVER ()::int AS role_wins
           FROM participants p
-         WHERE p.puuid = r.puuid
+         WHERE p.puuid = c.puuid
            AND p.champion_name = $1
            AND p.role = $2
            AND p.perk_primary IS NOT NULL
@@ -120,9 +133,8 @@ export async function getChampionOtpRunesHandler(req: Request): Promise<Response
          ORDER BY count(*) DESC
          LIMIT 1
       ) pg ON TRUE
-     WHERE (r.role_games::float / NULLIF(t.total_games, 0)) >= $6
-     ORDER BY CASE r.tier WHEN 'CHALLENGER' THEN 0 WHEN 'GRANDMASTER' THEN 1 WHEN 'MASTER' THEN 2 ELSE 9 END,
-              r.lp DESC
+     ORDER BY CASE c.tier WHEN 'CHALLENGER' THEN 0 WHEN 'GRANDMASTER' THEN 1 WHEN 'MASTER' THEN 2 ELSE 9 END,
+              c.lp DESC
      LIMIT 1;`;
 
   const client = await explorerPool().connect();
