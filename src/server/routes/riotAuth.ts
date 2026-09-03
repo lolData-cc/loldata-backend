@@ -94,10 +94,36 @@ async function exchangeRiotCode(code: string) {
  * mode="link": Links Riot to existing Supabase user (requires userId)
  * mode="login": Creates or finds Supabase user, returns session tokens
  */
+/**
+ * Who is actually calling, proved by their own session.
+ *
+ * ⚠️ NEVER trust a user id from the request body. Link mode used to take
+ * `userId` straight out of the JSON and write a Riot account onto that profile
+ * with the service-role key and no check at all — so anyone holding a fresh
+ * Riot authorisation code could bind their puuid onto somebody else's profile,
+ * unauthenticated. The id has to come from a token the caller can only have by
+ * being that person.
+ */
+async function callerId(req: Request): Promise<string | null> {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data?.user) return null;
+    return data.user.id;
+  } catch {
+    return null;
+  }
+}
+
 export async function riotAuthCallbackHandler(req: Request): Promise<Response> {
   try {
     const body = await req.json();
-    const { code, userId, mode = userId ? "link" : "login" } = body;
+    const { code, mode: rawMode } = body;
+    // The BODY no longer decides who you are, only what you are asking for.
+    const caller = await callerId(req);
+    const mode = rawMode === "link" || (!rawMode && caller) ? "link" : "login";
 
     if (!code) return new Response("Missing code", { status: 400 });
 
@@ -106,8 +132,14 @@ export async function riotAuthCallbackHandler(req: Request): Promise<Response> {
     const nametag = `${gameName}#${tagLine}`;
     const riotEmail = `riot_${puuid.slice(0, 16)}@riot.loldata.cc`;
 
-    if (mode === "link" && userId) {
-      // ── LINK MODE: attach Riot to existing Supabase user ──
+    if (mode === "link") {
+      // ── LINK MODE: attach Riot to the CALLER'S OWN account ──
+      // No session, no link. This is a privileged write onto a profile row, so
+      // it is only ever performed for the person who proved they own it.
+      if (!caller) {
+        return Response.json({ error: "not-signed-in" }, { status: 401 });
+      }
+      const userId = caller;
       const { data: existing } = await supabaseAdmin
         .from("profile_players")
         .select("profile_id")
@@ -145,8 +177,19 @@ export async function riotAuthCallbackHandler(req: Request): Promise<Response> {
       supabaseUserId = existingProfile.profile_id;
     } else {
       // Check if a Supabase user with the riot email exists
-      const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
-      const existingUser = userList?.users?.find(u => u.email === riotEmail);
+      /**
+       * ⚠️ PAGINATED. `listUsers()` returns only the FIRST page — fifty by
+       * default — so past that many accounts this lookup silently stops finding
+       * the synthetic riot_*@riot.loldata.cc user and mints a duplicate account
+       * for a returning RSO player on every sign-in.
+       */
+      let existingUser: { id: string; email?: string } | undefined;
+      for (let page = 1; page <= 40 && !existingUser; page++) {
+        const { data: userList } = await supabaseAdmin.auth.admin.listUsers({ page, perPage: 1000 });
+        const users = userList?.users ?? [];
+        existingUser = users.find((u) => u.email === riotEmail);
+        if (users.length < 1000) break;
+      }
 
       if (existingUser) {
         supabaseUserId = existingUser.id;
