@@ -58,45 +58,32 @@ export async function fetchChampionOtps(
   if (!(key in REGION_TO_PLATFORM)) return [];
   const platform = REGION_TO_PLATFORM[key];
 
+  // Reads the nightly summary (otp_champion_players) instead of deriving the
+  // aggregates per request.
+  //
+  // ⚠️ The RANK is still joined live from `players`, deliberately. Tier,
+  // division and LP change every game; the participant-derived stats move
+  // slowly. Freezing the first with the second would have the tab showing a
+  // rank a day out of date.
+  //
+  // What this replaces: the same answer used to cost a 1.5M-row bitmap heap
+  // scan of `participants` per champion per request — 184 seconds measured on
+  // Ahri, and a 500 when parallel workers exhausted the container's /dev/shm.
+  // See src/jobs/otp-precompute.ts in loldata-cron for the build side.
   const sql = `
-    WITH champ AS (
-      SELECT p.puuid,
-             count(*)                                        AS champ_games,
-             count(*) FILTER (WHERE p.win)                   AS champ_wins,
-             sum(p.kills)::int                               AS k,
-             sum(p.deaths)::int                              AS d,
-             sum(p.assists)::int                             AS a,
-             sum(p.total_cs)::bigint                         AS cs,
-             sum(p.time_played)::bigint                      AS secs,
-             mode() WITHIN GROUP (ORDER BY p.perk_keystone)        AS keystone,
-             mode() WITHIN GROUP (ORDER BY p.perk_sub_style)       AS sub_style,
-             mode() WITHIN GROUP (ORDER BY p.legendary_order[1])   AS first_item
-      FROM participants p
-      WHERE p.champion_name = $1 AND p.puuid IS NOT NULL
-      GROUP BY p.puuid
-    ),
-    ranked AS (
-      SELECT c.*, pl.game_name, pl.tag_line, pl.tier, pl.division, pl.lp, pl.icon_id, pl.platform
-      FROM champ c
-      JOIN players pl ON pl.puuid = c.puuid
-      WHERE pl.tier = ANY($2)
-        AND c.champ_games >= $3
-        AND ($4::text IS NULL OR pl.platform = $4)
-    ),
-    totals AS (
-      SELECT puuid, count(*) AS total_games
-      FROM participants
-      WHERE puuid IN (SELECT puuid FROM ranked)
-      GROUP BY puuid
-    )
-    SELECT r.puuid, r.game_name, r.tag_line, r.tier, r.division, r.lp, r.icon_id, r.platform,
-           r.champ_games, r.champ_wins, r.k, r.d, r.a, r.cs, r.secs,
-           r.keystone, r.sub_style, r.first_item, t.total_games
-    FROM ranked r
-    JOIN totals t ON t.puuid = r.puuid
-    WHERE (r.champ_games::float / NULLIF(t.total_games, 0)) >= $5
-    ORDER BY CASE r.tier WHEN 'CHALLENGER' THEN 0 WHEN 'GRANDMASTER' THEN 1 WHEN 'MASTER' THEN 2 ELSE 9 END,
-             r.lp DESC
+    SELECT o.puuid, pl.game_name, pl.tag_line, pl.tier, pl.division, pl.lp,
+           pl.icon_id, pl.platform,
+           o.champ_games, o.champ_wins, o.k, o.d, o.a, o.cs, o.secs,
+           o.keystone, o.sub_style, o.first_item, o.total_games
+    FROM otp_champion_players o
+    JOIN players pl ON pl.puuid = o.puuid
+    WHERE o.champion_name = $1
+      AND pl.tier = ANY($2)
+      AND o.champ_games >= $3
+      AND ($4::text IS NULL OR pl.platform = $4)
+      AND (o.champ_games::float / NULLIF(o.total_games, 0)) >= $5
+    ORDER BY CASE pl.tier WHEN 'CHALLENGER' THEN 0 WHEN 'GRANDMASTER' THEN 1 WHEN 'MASTER' THEN 2 ELSE 9 END,
+             pl.lp DESC
     LIMIT $6;`;
 
   const { rows } = await explorerPool().query(sql, [
