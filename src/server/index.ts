@@ -7,6 +7,7 @@ import { Buffer } from "buffer";
 import { logger } from "./logger";
 import { checkProHandler } from "./routes/checkPro"
 import { getMatchesHandler } from "./routes/getMatches"
+import { getPlayerChampionRunesHandler } from "./routes/getPlayerChampionRunes"
 import { explorerQueryHandler, explorerPatchHandler, explorerPatchExactHandler, rebuildPatchStatsHandler } from "./explorer/query"
 import { rebuildPatchStats } from "./explorer/patchStats"
 import { explorerBuildPathHandler } from "./explorer/buildPath"
@@ -525,6 +526,13 @@ const server = serve({
     // === ROUTE API ===
 if (pathname === "/api/matches" && req.method === "POST") {
   return withLogAndCors(req, pathname, getMatchesHandler);
+}
+
+// The runes a searched player ran on the champion just locked in champ select.
+// POST, never a query string: a Riot ID is personal data and does not belong in
+// a URL that gets logged by everything it passes through.
+if (pathname === "/api/player/champion-runes" && req.method === "POST") {
+  return withLogAndCors(req, pathname, getPlayerChampionRunesHandler);
 }
 
 if (pathname === "/api/explorer/query" && req.method === "POST") {
