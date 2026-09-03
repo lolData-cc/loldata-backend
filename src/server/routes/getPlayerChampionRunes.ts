@@ -205,6 +205,7 @@ export async function getPlayerChampionRunesHandler(req: Request): Promise<Respo
     let hit: any = null;
     let games = 0;
     let wins = 0;
+    let offRole = 0;
     const others = new Map<string, number>();
 
     for (let i = 0; i < ids.length; i += BATCH_SIZE) {
@@ -230,6 +231,25 @@ export async function getPlayerChampionRunesHandler(req: Request): Promise<Respo
         if (Number(me.championId) !== championId) {
           const n = String(me.championName ?? "");
           if (n) others.set(n, (others.get(n) ?? 0) + 1);
+          continue;
+        }
+
+        /**
+         * ⚠️ THE ROLE IS A FILTER, not a footnote.
+         *
+         * A Qiyana jungle page handed to someone locking Qiyana mid is another
+         * lane's runes, which is the one thing this panel is not allowed to do
+         * — `runeGap` exists precisely so the app can say "no data for this
+         * role" rather than borrow a page from a different one. A searched
+         * player must be held to the same rule as the cohort.
+         *
+         * A game with no `teamPosition` at all is accepted: that is us being
+         * unable to tell, not evidence of a different lane, and dropping it
+         * would silently shrink the window.
+         */
+        const pos = String(me.teamPosition ?? "").toUpperCase();
+        if (role && pos && pos !== role) {
+          offRole++;
           continue;
         }
 
@@ -276,11 +296,16 @@ export async function getPlayerChampionRunesHandler(req: Request): Promise<Respo
           checked,
           partial,
           champions: [] as { name: string; games: number }[],
+          offRole,
         }
       : {
           hit: null,
           checked,
           partial,
+          // How many times they DID play the champion, just not in this lane.
+          // It is the difference between "they do not play this" and "they
+          // play this, elsewhere" — two answers that deserve different words.
+          offRole,
           // What they DID play is what turns a dead end into something the
           // player can act on — they can search a different champion, or know
           // this account is not the one they meant.
