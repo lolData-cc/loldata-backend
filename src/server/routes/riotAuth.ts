@@ -140,21 +140,51 @@ export async function riotAuthCallbackHandler(req: Request): Promise<Response> {
         return Response.json({ error: "not-signed-in" }, { status: 401 });
       }
       const userId = caller;
+
+      // ⚠️ A Riot account belongs to ONE profile: the table enforces it with a
+      // unique index on lower(nametag). This code used to ignore the error that
+      // enforcement produced — the insert failed, the log said "linked", the
+      // client showed a green toast, and the dashboard said NOT LINKED. It bit
+      // the first returning user after the account reset: their old profile
+      // row (an orphan, its auth user gone) still held the nametag.
+      //
+      // So: find who holds this puuid or nametag. An orphan is released; a
+      // living account is a real conflict and the caller is told so.
+      const [byPuuid, byName] = await Promise.all([
+        supabaseAdmin.from("profile_players").select("profile_id").eq("puuid", puuid).neq("profile_id", userId).maybeSingle(),
+        supabaseAdmin.from("profile_players").select("profile_id").ilike("nametag", nametag).neq("profile_id", userId).maybeSingle(),
+      ]);
+      const holders = [...new Set([byPuuid.data?.profile_id, byName.data?.profile_id].filter(Boolean) as string[])];
+      for (const holder of holders) {
+        const { data: holderUser, error: holderErr } = await supabaseAdmin.auth.admin.getUserById(holder);
+        if (!holderErr && holderUser?.user) {
+          console.warn(`Riot RSO link refused: ${nametag} is held by user ${holder}, asked by ${userId}`);
+          return Response.json(
+            { error: "already-linked", message: "This Riot account is already linked to another lolData account." },
+            { status: 409 },
+          );
+        }
+        const { error: delErr } = await supabaseAdmin.from("profile_players").delete().eq("profile_id", holder);
+        if (delErr) {
+          console.error("Riot RSO link: could not release orphan row", holder, delErr.message);
+          return Response.json({ error: "link-failed", message: delErr.message }, { status: 500 });
+        }
+        console.log(`Riot RSO link: released orphan profile row ${holder} holding ${nametag}`);
+      }
+
       const { data: existing } = await supabaseAdmin
         .from("profile_players")
         .select("profile_id")
         .eq("profile_id", userId)
         .maybeSingle();
 
-      if (existing) {
-        await supabaseAdmin
-          .from("profile_players")
-          .update({ puuid, nametag, region })
-          .eq("profile_id", userId);
-      } else {
-        await supabaseAdmin
-          .from("profile_players")
-          .insert({ profile_id: userId, player_id: userId, puuid, nametag, region });
+      const write = existing
+        ? await supabaseAdmin.from("profile_players").update({ puuid, nametag, region }).eq("profile_id", userId)
+        : await supabaseAdmin.from("profile_players").insert({ profile_id: userId, player_id: userId, puuid, nametag, region });
+      // ⚠️ Never report success on a failed write.
+      if (write.error) {
+        console.error("Riot RSO link: write failed", write.error.message);
+        return Response.json({ error: "link-failed", message: write.error.message }, { status: 500 });
       }
 
       console.log(`Riot RSO linked: ${nametag} (${region}) → user ${userId}`);
